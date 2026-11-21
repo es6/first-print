@@ -24,10 +24,12 @@ from first_print.binding_text import (
     FUSED,
     MEASURE_STEMS,
     WORD,
+    amount_currencies,
     basis_of,
     claimed_amounts,
     count_words,
     currencies,
+    currency_code,
     date_of,
     duration,
     durations_in,
@@ -376,6 +378,7 @@ class _Context:
     scale: str | None = None
     terms: _Terms = _NO_TERMS
     end: date | None = None  # the last day of the period the release reports
+    section: str = ""  # an explicitly named business section above the cited block
 
     def __str__(self) -> str:
         return f"{self.near}\n{self.far}"
@@ -389,9 +392,30 @@ def _context(document: SourceDocument, block_id: str) -> _Context:
     passed_table = False
     lead = ""
     scale = None
+    section = ""
     for block in document.blocks:
         if block.id == block_id:
             break
+        text = block.text.strip()
+        # Some IR pages lay a business heading out as a one-cell table. Accept a name
+        # with its acronym, or the explicit "Results for ..." corner of a results table.
+        named = re.fullmatch(r"[A-Z][A-Za-z &'’,.-]{2,85}\s+\([A-Z]{2,6}\)", text)
+        results = re.match(r"Results for ([^|\n]{2,80})", text, re.IGNORECASE)
+        if results and _generic_heading(results[1]):
+            results = None
+        if named or results:
+            heading = results[1].strip() if results else text
+            if not section or not _names_group(section, heading):
+                section = heading
+            local.clear()
+        elif (
+            block.kind == "paragraph"
+            and len(text) <= 100
+            and not re.search(r"[.!?;]|\d", text)
+            and text.rstrip(":").casefold() != "discussion of results"
+        ):
+            # A new standalone heading ends the section, even when it names no business.
+            section = ""
         lead = block.text if block.kind == "paragraph" and len(block.text) <= 300 else ""
         # A caption's scale holds for the tables after it until another states its own:
         # Walmart's "Dollars in billions, except as noted" over three segment tables
@@ -422,7 +446,7 @@ def _context(document: SourceDocument, block_id: str) -> _Context:
     if outlook:
         near = [outlook, *near]
     far = [line for line in opening[:12] if _METADATA.search(line)]
-    return _Context("\n".join(near), "\n".join(far), lead=lead, scale=scale)
+    return _Context("\n".join(near), "\n".join(far), lead=lead, scale=scale, section=section)
 
 
 # Words after a growth rate that say what it compares, not what it measures
@@ -811,7 +835,7 @@ def _basis_issues(fact: ReferencedFact, value: SourcedValue, source: str) -> tup
 
 def _currency_issues(value: SourcedValue, local: str, context: str) -> tuple[list[str], str]:
     found = currencies(local) or currencies(context)
-    claimed = value.currency.strip().upper()
+    claimed = currency_code(value.currency.strip())
     if not found:
         return [], claimed
     if claimed and claimed not in found:
@@ -1032,6 +1056,7 @@ def _table_binding(
         if len(claims) == 2 and (high := _range_end(table, row, index)):
             raw = f"{raw} to {high}"
         label, section = (terms.expand(t) for t in _label_and_group(table, cell))
+        section = section or terms.expand(frame.section)
         headers = f"{_headers(table, cell)} {prefix}".strip()
         named = _PERIOD_ONLY.sub("", headers).strip(" -:|")
         if label.strip() and not _PERIOD_ONLY.sub("", label).strip(" -:|") and named:
@@ -1299,6 +1324,7 @@ def _metric_window(claim: list[str], prefix: str) -> tuple[int, int] | None:
     if not claim:
         return None
     tokens = [(m.start(), m.end(), m[0]) for m in re.finditer(rf"{FUSED}{WORD}", prefix)]
+    tokens = [t for t in tokens if t[2] not in {"of", "the", "its", "our", "company's"}]
     names = [stem(t[2].replace("-", "")) for t in tokens]
     for end in range(len(tokens) - 1, -1, -1):
         if names[end] != claim[-1]:
@@ -1324,7 +1350,14 @@ _SECTION_WORDS = frozenset(stem(w) for w in ("results", "highlights", "summary",
 _MANAGED = stem("managed")  # JPMorgan's managed basis: "managed revenue of $50.9 billion"
 
 
-def _named_after(claim: list[str], following: str, kind: str, growth: bool, prefix: str) -> bool:
+def _named_after(
+    claim: list[str],
+    following: str,
+    kind: str,
+    growth: bool,
+    prefix: str,
+    group_words: set[str],
+) -> bool:
     """An amount or a growth rate can name its measure right after it: "delivered $1.1 billion
     in revenue", "closed $1.463 billion of U.S. commercial TCV", "up 28%, with 19% growth in
     organic sales". The phrase after "in" or "of" must be the claimed measure, no more: "$5
@@ -1342,12 +1375,26 @@ def _named_after(claim: list[str], following: str, kind: str, growth: bool, pref
         r"\b(?:accounted for|contribut\w*|represent\w*|comprised|of which)[\s$€£¥(]*$", prefix
     ):
         return False  # a part of the measure: "Cloud accounted for $4.5 billion of revenue"
+    modifier = ""
+    if kind == "money":
+        change_to = re.search(r"\b(increase|decrease|addition|reduction) of\s*[$€£¥]?\s*$", prefix)
+        if change_to and stem(change_to[1]) in claim:
+            lead = r"\s*to\s+"
+        remainder = re.match(r"\s*(remaining|available)\s+(?:under|for)\s+", following)
+        if remainder:
+            modifier = remainder[1]
+            lead = re.escape(remainder[0])
     found = re.match(lead + r"([a-z&\-.' ]+)", following)
     if found is None:
         return False
     phrase = re.split(r"\b(?:and|or|compared|from|versus|vs|to|on|over|for|at)\b", found[1])[0]
-    named = stems(phrase.rstrip(". "))
-    if not named or named[-1] not in claim or set(named) - set(claim) > _BASIS_STEMS:
+    phrase = re.sub(r"\b(?:the company['’]s|its|our|the)\s+", "", phrase)
+    named = metric_words(f"{modifier} {phrase.rstrip('. ')}")
+    if (
+        not named
+        or named[-1] not in claim
+        or not (set(named) - set(claim)) <= _BASIS_STEMS | group_words
+    ):
         return False
     if kind == "money" and _changed_by(prefix, claim):
         return False
@@ -1541,6 +1588,53 @@ def _modifier_issues(prefix: str, start: int, claim: list[str]) -> list[str]:
     return []
 
 
+def _business_tail(tail: str, group: str) -> bool:
+    """A named business can qualify a measure: "from higher-margin overseas operations".
+
+    Extra measures, totals or conjunctions are not a business descriptor.
+    "Revenue from overseas operations and membership fees" must still be refused.
+    """
+    if not group or not re.match(r"\s+(?:from|of)\s+", tail) or not _clause_names(group, tail):
+        return False
+    tail = re.sub(r"\b(?:higher|lower|high|low)[- ]margin\b", "", tail)
+    remaining = set(metric_words(tail)) - set(metric_words(group))
+    grammar = "from of the operations business segment division was were is are amounted to"
+    grammar += " usd eur gbp cad jpy rmb cny aud chf sek inr brl"
+    return remaining <= set(stems(grammar))
+
+
+def _aggregate_window(
+    claim: list[str], text: str, tokens: list[tuple[int, int, Decimal, Decimal, str]], index: int
+) -> tuple[int, int] | None:
+    """An explicitly named aggregate of covered components, whose same-currency sum agrees."""
+    token = tokens[index]
+    named = re.search(
+        r"\b(?:for an |for a |for the )?aggregate amount of\s*\w*\s*$", text[: token[0]]
+    )
+    core = set(claim) - {stem("aggregate")}
+    currency = amount_currencies(text, token[0], token[1])
+    if not named or stem("aggregate") not in claim or len(core) < 2 or not currency:
+        return None
+    components = [
+        t
+        for t in tokens[:index]
+        if t[4] == "number" and amount_currencies(text, t[0], t[1]) == currency
+    ]
+    if len(components) < 2 or abs(sum(t[2] for t in components) - token[2]) > token[3] / 2:
+        return None
+    # Every component must name part of the claimed aggregate; an extra loan balance
+    # cannot silently become "cash and investments" just because the sum matches.
+    ends = [t[0] for t in components[1:]] + [named.start()]
+    if not all(
+        core & set(metric_words(text[part[1] : end]))
+        for part, end in zip(components, ends, strict=True)
+    ):
+        return None
+    if not core <= set(metric_words(text[: named.start()])):
+        return None
+    return components[0][0], named.end()
+
+
 def _positional_issues(
     text: str,
     tokens: list[tuple[int, int, Decimal, Decimal, str]],
@@ -1558,6 +1652,22 @@ def _positional_issues(
     run = tokens[index : index + width]
     for neighbour in (index - 1, index + width):
         if 0 <= neighbour < len(tokens) and tokens[neighbour][4] == dimension:
+            own_currency = amount_currencies(text, run[0][0], run[-1][1])
+            other = tokens[neighbour]
+            other_currency = amount_currencies(text, other[0], other[1])
+            parenthetical = any(
+                text[t[0] : t[1]].lstrip().startswith("(") and text[t[1] :].lstrip().startswith(")")
+                for t in (run[0], other)
+            )
+            if (
+                parenthetical
+                and own_currency
+                and other_currency
+                and own_currency.isdisjoint(other_currency)
+            ):
+                # "RMB336.5 million (US$50.2 million)" names a translation, not an
+                # unlabelled row of current/prior values. Each amount keeps its currency.
+                continue
             # The text between this value and the next one before or after it
             gap = text[min(run[-1][1], tokens[neighbour][1]) : max(run[0][0], tokens[neighbour][0])]
             if not re.search(r"[a-z]{2,}", gap):
@@ -1608,7 +1718,12 @@ def _paragraph_binding(
         measure = [w for w in measure if w not in _GUIDANCE_STEMS] or measure
     # The group's words are checked as the group; when they are all the measure has
     # ("Adobe AI-first ARR" growth), the measure is named in full
-    claim = [w for w in measure if w not in set(metric_words(group))] or measure
+    group_words = set(metric_words(group))
+    if group and _names_group(group, terms.expand(frame.section)):
+        # "CIB net revenue" below "Commercial & Investment Bank (CIB)": the heading
+        # establishes the abbreviation as part of the group, not the measure's name.
+        group_words |= {w for form in _group_forms(frame.section) for w in metric_words(form)}
+    claim = [w for w in measure if w not in group_words] or measure
     # "Net sales" is named by "Sales in the quarter were", unless the release tells them apart
     required = [w for w in claim if w not in terms.optional(set(claim))] or claim
     named_claim, named_required = claim, required
@@ -1669,6 +1784,23 @@ def _paragraph_binding(
             window = None if worded else _metric_window(claim, prefix)
             if window is None and required != claim and not worded:
                 window = _metric_window(required, prefix)
+            if window is None and (
+                product := re.match(r"[A-Z]{2,6}\s+\d+(?:\.\d+)+\b", fact.metric)
+            ):
+                # A named product before its measure can follow it in the source:
+                # "WRD 3.0 cumulative deliveries" / "cumulative deliveries of ... WRD 3.0".
+                identity = metric_words(product[0])
+                window = _metric_window(claim[len(identity) :] + identity, prefix)
+            aggregate = (
+                _aggregate_window(claim, text, tokens, index)
+                if stem("aggregate") in claim and field == "current_actual" and kind == "money"
+                else None
+            )
+            if stem("aggregate") in claim and not aggregate:
+                failures.append("the aggregate components or sum are not established")
+                continue
+            if aggregate:
+                window = aggregate
             if worded:
                 # A count written as a word counts only the noun phrase right after it
                 if _counted_after(required, following, prefix):
@@ -1703,7 +1835,7 @@ def _paragraph_binding(
             if (
                 window is None
                 and not worded
-                and _named_after(required, following, kind, growth_slot, prefix)
+                and _named_after(required, following, kind, growth_slot, prefix, group_words)
             ):
                 window = (token[0], token[0])
             if (
@@ -1740,6 +1872,13 @@ def _paragraph_binding(
             if window is None:
                 failures.append("metric is absent from the cited claim clause")
                 continue
+            versioned = re.findall(r"\b([A-Za-z]{2,6})\s+(\d+(?:\.\d+)+)\b", fact.metric)
+            if any(
+                not re.search(rf"\b{re.escape(name)}\s+{re.escape(version)}\b", text, re.IGNORECASE)
+                for name, version in versioned
+            ):
+                failures.append("the source names a different product version")
+                continue
             between = stems(
                 re.sub(
                     r"[$€£¥]?\(?-?\d[\d,.]*\)?\s*(?:%|bps|billion|million|thousand|[kmbt]\b)?",
@@ -1747,7 +1886,11 @@ def _paragraph_binding(
                     prefix[window[1] :],
                 )
             )
-            if any(w in MEASURE_STEMS and w not in claim for w in between):
+            if (
+                not aggregate
+                and any(w in MEASURE_STEMS and w not in claim for w in between)
+                and not _business_tail(prefix[window[1] :], group)
+            ):
                 failures.append("a different measure lies between the metric and the number")
                 continue
             # The name the clause gives runs on to the verb or preposition before the number
@@ -1783,6 +1926,8 @@ def _paragraph_binding(
                     r"\b(?:compared (?:with|to)|versus|vs\.?|from|to)\b", prefix[window[1] :]
                 )
             )
+            if _business_tail(prefix[window[1] :], group):
+                roles = []  # "from overseas operations" is scope, not a prior amount
             if roles and roles[-1][0] == "to":
                 before = prefix[window[1] + roles[-1].end() :]
             temporal = f"{before} {text[after_end:following]}"
@@ -1790,14 +1935,36 @@ def _paragraph_binding(
             comparator = bool(roles) and (
                 roles[-1][0] == "from" or (roles[-1][0] != "to" and bool(previous))
             )
+            if field == "prior_year_actual" and comparator:
+                temporal = prefix[window[1] + roles[-1].start() :] + text[after_end:following]
+            period_value = value
+            if (
+                field == "prior_year_actual"
+                and comparator
+                and frame.reported
+                and years(value.period) == {frame.reported[0]}
+                and years(temporal) == {str(int(frame.reported[0]) - 1)}
+            ):
+                # The text explicitly dates the comparator: "compared with ... in the
+                # same period of 2025". The legacy fact stores the current year on all slots.
+                previous_period = re.sub(
+                    frame.reported[0], str(int(frame.reported[0]) - 1), value.period
+                )
+                period_value = value.model_copy(update={"period": previous_period})
+                prior_word = True
             if field == "current_actual" and (prior_word or comparator):
                 issues.append("current actual is attached to the comparison/prior-year amount")
             if field not in ("previous_guidance", "new_guidance") and _FROM_BOUNDARY.search(text):
                 issues.append("the clause counts the value from a period's boundary")
-            dated = _balance_date(text, token[0], after_end, previous[-1][1] if previous else 0)
+            dated = _balance_date(
+                text, token[0], after_end, previous[-1][1] if previous and not aggregate else 0
+            )
             if dated is not None and field in ("current_actual", "prior_year_actual"):
                 # A balance on a date is the value of the period that ends on it: backlog "at
                 # September 30, 2026" is fiscal 2026's, never "at June 30, 2026"
+                claimed_date = DATE.search(value.period)
+                if claimed_date and date_of(claimed_date) != dated:
+                    issues.append("the balance date differs from the claimed date")
                 end = frame.end
                 if field == "prior_year_actual" and end is not None:
                     end = _year_before(end)
@@ -1857,8 +2024,39 @@ def _paragraph_binding(
             money = kind == "count" and bool(
                 _MONEY_MARK.search(text[max(0, token[0] - 4) : token[0] + 1])
             )
-            if group and not _clause_names(group, text) and not _names_itself(fact, group, text):
+            scope = terms.expand(_group(fact.model_copy(update={"group": frame.section}), terms))
+            group_text = prefix[previous[-1][1] if previous else 0 :] + text[after_end:following]
+            stated_group = _clause_names(group, group_text) or _names_itself(
+                fact, group, group_text
+            )
+            if (
+                not stated_group
+                and growth_slot
+                and set(metric_words(group)) & MEASURE_STEMS
+                and re.search(r"\bincluding\b", prefix)
+                and _clause_names(group, re.split(r"\bincluding\b", prefix)[0])
+            ):
+                # An explicit breakdown inherits its parent measure: comparable sales
+                # "including ... average check and ... transactions".
+                stated_group = True
+            if group and not stated_group and not _clause_names(group, scope):
                 issues.append("segment/group is absent from the claim clause")
+            elif group and not stated_group:
+                # A heading scopes a bare measure, not another named business's measure:
+                # "Banking & Payments revenue" beneath CIB is not CIB net revenue.
+                # Stay conservative when the measure is named only after the number.
+                before = _segment(prefix[: window[0]])
+                leading = set(metric_words(before))
+                leading -= {stem(w) for w in ("the", "our", "its", "this", "segment", "business")}
+                if named_next or leading:
+                    issues.append("the section cannot establish this more specific source measure")
+            if (
+                scope
+                and not group
+                and not _names_group(scope, metric)
+                and not _names_itself(fact, scope, text)
+            ):
+                issues.append("the source belongs to a business section the claim doesn't name")
             bounds = text[max(0, token[0] - 20) : after_end]
             # "approximately $1.2 billion" claimed as "$1.2 billion" is shown as the source
             # words it; any other difference in a bound is a different claim
@@ -1925,14 +2123,14 @@ def _paragraph_binding(
                     period_near = f"{period_text}\n{frame.near}"
             issues.extend(
                 period_issues(
-                    value,
+                    period_value,
                     period_text,
                     period_near,
                     frame.far,
                     comparative=False,
                     clause=True,
                     prior=field == "prior_year_actual"
-                    and years(period_text) != years(value.period),
+                    and years(period_text) != years(period_value.period),
                     offset=frame.offset,
                     reported=frame.reported,
                     change=growth_slot,
@@ -1940,7 +2138,11 @@ def _paragraph_binding(
                 )
             )
             currency_issues, currency = (
-                _currency_issues(value, clause, context)
+                _currency_issues(
+                    value,
+                    " ".join(amount_currencies(text, token[0], after_end)),
+                    f"{clause}\n{context}",
+                )
                 if kind in ("money", "per share") or money
                 else ([], "")
             )
@@ -1951,6 +2153,8 @@ def _paragraph_binding(
             if approximate:
                 shown = shown.model_copy(update={"value_qualifier": "approximately"})
             if not issues:
+                if period_value is not value:
+                    shown = shown.model_copy(update={"period": period_value.period})
                 kept = shown.model_copy(update={"basis": basis})
                 return [], ref.block_id, _accepted(kept, currency, unit)
             failures.extend(issues)
@@ -2181,10 +2385,12 @@ def _group_stated(fact: ReferencedFact, document: SourceDocument, terms: _Terms)
                 # in a cell names it in its own text
                 if cells and not _prose(cells[0]):
                     label, section = _label_and_group(block, cells[0])
+                    section = section or _context(document, ref.block_id).section
                     if not _names_group(group, terms.expand(f"{label} | {section}")):
                         return False
                     continue
-            if not _names_group(group, terms.expand(ref.quote)):
+            scope = _context(document, ref.block_id).section
+            if not _names_group(group, terms.expand(f"{scope}\n{ref.quote}")):
                 return False
     return True
 

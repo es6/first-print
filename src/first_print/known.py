@@ -22,6 +22,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from first_print.newsroom_discovery import NewsroomFinding
 from first_print.periods import NTH, ORD
 from first_print.recorder import ET, Target, Trial
 from first_print.sources import issuer_wire_name
@@ -87,6 +88,7 @@ class KnownCompany(BaseModel):
     investigated: date | None = None
     # What that investigation checked, kept and rejected, and which version of it ran
     checks: list[SourceCheck] = []
+    newsrooms: list[NewsroomFinding] = []
     investigation: int = 0
 
 
@@ -230,6 +232,7 @@ def to_target(
         newswire=business_wire,
         prnewswire=pr_newswire,
         wire_publisher=wire_publisher(company),
+        newsrooms=[item.route() for item in company.newsrooms if item.enabled],
         rss=company.rss,
         rss_spelled=company.rss_spelled,
         # A guess counts as found on a 200, which a soft 404 would fake from the first poll
@@ -261,6 +264,9 @@ def target_toml(target: Target) -> str:
             f"{key} = {json.dumps(value)}"
             for key, value in target.ir.model_dump(exclude_defaults=True).items()
         ]
+    for room in target.newsrooms:
+        lines += ["", "[[target.newsrooms]]", f"listing = {json.dumps(room.listing)}"]
+        lines += _toml_list("names", room.names)
     trial = target.trial
     if trial != Trial():
         lines += ["", "# Additional live sources", "[target.trial]"]

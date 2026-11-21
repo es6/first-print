@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from urllib.parse import urlsplit
 
 import aiohttp
 import discord
@@ -60,6 +61,7 @@ REPLACE_AFTER = 3  # refused edits of one old card in a row before it's posted a
 DONE, WORKING, WAITING, FAILED, TODO = "✅", "⏳", "⏸️", "⚠️", "▫️"
 # A scorecard's state as one dot, for lists such as /upcoming
 READY, RESEARCHING, NOT_READY, PROBLEM = "🟢", "🔵", "🟡", "🔴"
+READY_CAVEAT = "🟠"
 
 
 def _card_body(card: discord.Embed) -> dict[str, object]:
@@ -243,6 +245,7 @@ class TrackProgress:
         research_mode: Callable[[], contextlib.AbstractContextManager[None]] | None = None,
         research_deferred: Callable[[], bool] = lambda: False,
         profile_note: Callable[[int], str | None] | None = None,
+        estimate_note: Callable[[int], str | None] | None = None,
         reviews: Calendar | None = None,
         claim: Callable[[int], bool] = lambda cik: True,
         release: Callable[[int], None] = lambda cik: None,
@@ -262,6 +265,7 @@ class TrackProgress:
         self.research_mode = research_mode or contextlib.nullcontext
         self.research_deferred = research_deferred
         self.profile_note = profile_note or (lambda cik: None)
+        self.estimate_note = estimate_note or (lambda cik: None)
         self.card_spacing = card_spacing
         self._last_card_edit = -card_spacing
         # Release posts and edits go first (see edit_priority)
@@ -411,11 +415,19 @@ class TrackProgress:
             return None
         _, review = self.reviews.review(cik)
         checking = bool(self.active and self.active[0] == cik)
-        color = self.render(row, review, checking).color
+        card, ready_caveat = self._render(row, review, checking)
+        if ready_caveat:
+            return READY_CAVEAT
+        color = card.color
         value = color.value if color is not None else None
         return {GREEN: READY, BLUE: RESEARCHING, RED: PROBLEM}.get(value or 0, NOT_READY)
 
     def render(self, row: Tracked, review: str | None, checking: bool) -> discord.Embed:
+        return self._render(row, review, checking)[0]
+
+    def _render(
+        self, row: Tracked, review: str | None, checking: bool
+    ) -> tuple[discord.Embed, bool]:
         target = self._target(row)
         speed = Speed.from_json(review)
         # Research waits only while it's paused, or for the company's own window
@@ -436,6 +448,12 @@ class TrackProgress:
         no_date = bool(phase and RECHECKING in phase)
         between = bool(no_date and phase and not phase.startswith("No release date"))
 
+        watched_rooms = {room.listing for room in target.newsrooms} if target else set()
+        newsroom_gaps = [
+            room
+            for room in row.company.newsrooms
+            if room.state != "verified" or (target and room.listing not in watched_rooms)
+        ]
         # The checklist, and the color and headline it adds up to
         form = row.company.sec_form or "8-K"
         steps = [f"{DONE} Found in SEC data: CIK {row.cik}, results on Form {form}"]
@@ -483,12 +501,15 @@ class TrackProgress:
         else:
             steps.append(f"{TODO} Speed history")
 
+        if newsroom_gaps:
+            steps.append(f"{FAILED} Independent newsroom coverage needs follow-up")
         working = any(step.startswith(WORKING) for step in steps)
         complete = (
             speed is not None
             and not investigating
             and not working
             and not ir_pending
+            and not newsroom_gaps
             and not cache_pending
             and row.cik not in self.audit_failed
             and (no_date or (target and phase is None))
@@ -555,10 +576,24 @@ class TrackProgress:
                 watching.append("IR press release page *(verified after the date is set)*")
             heading = "👀 Will watch once a date is set"
         embed.add_field(name=heading, value=bullets(watching) or "Nothing yet", inline=False)
+        if row.company.newsrooms:
+            inventory = []
+            for room in row.company.newsrooms:
+                state = "Watched" if room.listing in watched_rooms else "Not in the active plan"
+                if not target:
+                    state = "Prepared" if room.enabled else "Unresolved"
+                if room.state != "verified":
+                    state += "; unresolved"
+                inventory.append(f"[{state}](<{room.listing}>) · {room.reason}")
+            embed.add_field(
+                name="Independent newsroom inventory", value=bullets(inventory), inline=False
+            )
         if cache:
             embed.add_field(name="Cache preflight", value=bullets(cache), inline=False)
         if profile_note := self.profile_note(row.cik):
             embed.add_field(name="Summary context", value=profile_note, inline=False)
+        if estimate_note := self.estimate_note(row.cik):
+            embed.add_field(name="Analyst estimates", value=estimate_note, inline=False)
 
         if listing := row.company.ir_listing:
             status = row.company.ir_http_status
@@ -582,7 +617,14 @@ class TrackProgress:
             if not check.watch
             # Verified for this release since, so it's watched after all
             and not (
-                target and target.ir and target.ir.listing and "press release page" in check.source
+                target
+                and target.ir
+                and target.ir.listing
+                and "press release page" in check.source
+                and (
+                    target.ir.listing in check.source
+                    or (urlsplit(target.ir.listing).hostname or "__none__") in check.source
+                )
             )
         ]
         if target and target.ir is None and note and issuer_listing(row.ticker, row.company):
@@ -594,7 +636,7 @@ class TrackProgress:
                 name="📝 Research", value=truncate(row.company.evidence, 1024), inline=False
             )
         embed.set_footer(text=f"First Print {release_version()} · Updated")
-        return embed
+        return embed, bool(target and complete and caveats)
 
     async def _check(self, row: Tracked) -> None:
         try:

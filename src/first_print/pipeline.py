@@ -62,6 +62,7 @@ from first_print.sources import (
 )
 from first_print.summary import MODEL, WRITER, Summarizer, SummaryError
 from first_print.text import release_document, verified_report
+from first_print.transition_evidence import TransitionEvidence
 
 FILE_TYPES = (".pdf", ".xlsx", ".xls")
 # A release PDF is summarized as soon as it's read. A page reads better (its tables keep their
@@ -374,6 +375,8 @@ def fan_out(posters: Sequence[Poster]) -> Poster:
 
 
 def describe_source(source: Source) -> str:
+    if source.name.startswith("newsroom:"):
+        return f"Official newsroom ({urlsplit(source.url()).hostname})"
     if isinstance(source, BrowserRss):
         return "IR press release feed"
     if isinstance(source, Q4PressReleases | Q4FinancialReports | BrowserRelease | IssuerNews):
@@ -551,6 +554,10 @@ class Release:
         if is_file:
             label = self._file_label(sighting.url)
         self._spawn(self._link(label, sighting.url))
+        if sighting.details.get("content_kind") == "highlights":
+            self.journal.write("highlights_only", ticker=self.target.ticker, url=sighting.url)
+            self._ask_issuer()
+            return  # alert now; independent IR/wire sources still provide the full summary
         if is_file:
             self._spawn(self._attach(sighting.url, sighting.body))
             if urlsplit(sighting.url).path.lower().endswith(".pdf") and not isinstance(
@@ -1121,7 +1128,7 @@ class Release:
                 )
             except SummaryError as error:
                 if self.jobs:
-                    self.jobs.summary_status(key, FAILED)
+                    self.jobs.summary_status(key, FAILED, evidence=error.evidence)
                 self.summarizing = False  # let a later source try
                 self.journal.write("summary_error", ticker=self.target.ticker, message=str(error))
                 self.journal.say(f"{self.target.ticker}: summary failed: {error}")
@@ -1130,8 +1137,8 @@ class Release:
         footer = f"{BETA} · Summary by {WRITER} in {took:.0f}s from the {label} text"
         if summary.unverified:
             held = len(summary.unverified)
-            figures = "figure" if held == 1 else "figures"
-            footer += f" · {held} {figures} held back: the release didn't confirm them"
+            checks = "check" if held == 1 else "checks"
+            footer += f" · {held} verification {checks} flagged omitted facts or details"
         footer = footer[:2048]
         if self.jobs:
             self.jobs.summary_written(
@@ -1152,7 +1159,7 @@ class Release:
             input_tokens=summary.input_tokens,
             output_tokens=summary.output_tokens,
             document_sha256=document.sha256,
-            validation="source-references/1" if summary.evidence else "legacy",
+            validation=summary.validation,
             **({"replaces": replaces} if replaces else {}),
         )
 
@@ -1204,7 +1211,7 @@ async def watch_schedule(
     """Runs the schedule and posts each release to the channel. `ping`, a cheap Discord request,
     keeps the connection open during windows (see keep_warm)."""
     with log_path.open("a", encoding="utf-8") as file:
-        journal = Journal(file)
+        journal = Journal(file, evidence=TransitionEvidence.for_log(log_path))
         async with Fetcher(sec_user_agent) as fetcher:
             releases = Releases(lambda: DiscordPoster(channel), fetcher, journal, summarizer)
             windows = [target.window for target in plan.target]

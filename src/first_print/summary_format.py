@@ -8,6 +8,7 @@ from collections import Counter
 from dataclasses import replace
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from first_print.summary_duplicates import combine_duplicates
 from first_print.summary_policy import SummaryFact, change_reference
 
 _SCALES = {
@@ -233,7 +234,8 @@ def format_period(value: str) -> str:
 
 
 def format_label(value: str) -> str:
-    text = re.sub(r"fee[- ]related earnings", "FRE", value, flags=re.IGNORECASE)
+    text = re.sub(r"\s*\(unaudited\)", "", value, flags=re.IGNORECASE)
+    text = re.sub(r"fee[- ]related earnings", "FRE", text, flags=re.IGNORECASE)
     text = re.sub(r"total operating earnings", "TOE", text, flags=re.IGNORECASE)
     return re.sub(r"\b([A-Z][A-Z0-9]{1,8})\s*\(\1\)", r"\1", text)
 
@@ -249,7 +251,7 @@ def format_change(value: str, comparison: str = "") -> str:
     text = re.sub(r"year[- ]over[- ]year|Y/Y", "YoY", value, flags=re.IGNORECASE)
     text = re.sub(r"quarter[- ]over[- ]quarter|Q/Q", "QoQ", text, flags=re.IGNORECASE)
     match = re.fullmatch(
-        r"\s*(\()?([+-]?\d+(?:\.\d+)?)\)?\s*(%|bps|pp)\)?"
+        r"\s*(\()?([+-]?\d+(?:\.\d+)?)\)?\s*(%|bps|pp|percentage points?)\)?"
         r"\s*(YoY|QoQ|versus prior guidance)?\s*",
         text,
         re.IGNORECASE,
@@ -300,7 +302,8 @@ _GENERIC_UNIT = re.compile(
 # Tags that only restate the default or the section: "(reported)", "(Operating KPI)",
 # "(Forward outlook)"
 _DEFAULT_TAG = re.compile(
-    r"(?:as )?reported|(?:operating |key |financial |business )?(?:kpi|metric|indicator)s?|"
+    r"unaudited|(?:as )?reported|(?:operating |key |financial |business )?"
+    r"(?:kpi|metric|indicator)s?|"
     r"(?:forward(?:[- ]looking)? )?(?:outlook|guidance)|forward[- ]looking",
     re.IGNORECASE,
 )
@@ -313,6 +316,14 @@ def _shown_basis(part: str, label: str) -> bool:
         return False
     if not _STANDARD.search(part):
         return True
+    declared = re.sub(
+        r"\b(?:segment|consolidated|basis|measure)\b",
+        "",
+        _STANDARD.sub("", part),
+        flags=re.IGNORECASE,
+    )
+    if _basis_key(declared) == _basis_key(label):
+        return False
     if _ADJUSTED_BASIS.search(label):
         return True  # "Non-GAAP EPS (GAAP)" keeps the conflict visible
     return not _STATEMENT.fullmatch(_STANDARD.sub("", part).strip(" -"))
@@ -337,6 +348,9 @@ def format_fact(fact: SummaryFact) -> str:
         label = re.sub(rf"^{re.escape(stamp)}(?:\s+|:\s*)", "", label, flags=re.IGNORECASE)
     scope = " ".join(fact.group.split())
     scope_key = _basis_key(scope)
+    label_words, scope_words = set(_basis_key(label).split()), set(scope_key.split())
+    if len(label_words) >= 2 and label_words < scope_words:
+        label = scope  # "Middle East fleet" / "Middle East Robotaxi fleet" names one fleet
     # A neutral consolidation label adds no identity; an actual region/segment does.
     if (
         scope_key
@@ -368,7 +382,16 @@ def format_fact(fact: SummaryFact) -> str:
     if (
         dimension
         and re.search(r"\d", value)
-        and not re.search(r"[A-Za-z]{3,}", re.sub(r"\b[KMBT]\b|bn", "", value))
+        and not re.search(
+            r"[A-Za-z]{3,}",
+            re.sub(
+                r"\b[KMBT]\b|bn|approximately|about|around|roughly|nearly|almost|"
+                r"more than|less than|at least|up to",
+                "",
+                value,
+                flags=re.IGNORECASE,
+            ),
+        )
         and dimension.lower()[:5] not in f"{label} {value}".lower()
     ):
         value = f"{value} {dimension}"
@@ -382,8 +405,26 @@ def format_fact(fact: SummaryFact) -> str:
         and denominator[1].lower() not in label.lower()
     ):
         value = f"{value} of {denominator[1]}"
+    if (
+        reference
+        and not fact.change.strip()
+        and re.search(r"\b(?:doubled|tripled|quadrupled)\b", value, re.IGNORECASE)
+        and reference.casefold() not in value.casefold()
+    ):
+        value += f" {reference}"
     change = format_change(fact.change, reference)
     rate = re.fullmatch(r"([2212-]?)\+?(\d+(?:\.\d+)?)%", value.strip())
+    if (
+        rate
+        and reference
+        and not change.strip()
+        and not re.search(r"margin|rate|ratio|share", label, re.IGNORECASE)
+        and (
+            value.strip().startswith(("+", "-"))
+            or re.search(r"growth|increase|decrease|decline", label, re.IGNORECASE)
+        )
+    ):
+        value = format_change(value, reference)
     if (
         rate
         and not re.search(r"margin|rate|ratio|share", label, re.IGNORECASE)
@@ -397,6 +438,9 @@ def format_fact(fact: SummaryFact) -> str:
     if not value.strip():  # a growth rate given without a level
         return f"{prefix}{label}: {change}" if change.strip() else f"{prefix}{label}"
     text = f"{prefix}{label}: {value}"
+    if fact.estimate:
+        marker = {"above": "🟢", "below": "🔴", "inline": "🟡"}.get(fact.estimate_result, "")
+        text += f" ({marker + ' ' if marker else ''}Est. {fact.estimate})"
     return f"{text}; {change}" if change.strip() else text
 
 
@@ -473,7 +517,10 @@ _COMPANY = re.compile(
 
 
 def _line(fact: SummaryFact, marker: str, stamp: str = "") -> str:
-    text = format_fact(replace(fact, period=""))
+    text = format_fact(fact)
+    period = format_period(fact.period)
+    if period:
+        text = text.removeprefix(f"{period} · ")
     metric, _, value = text.partition(": ")
     if stamp and stamp.lower() not in text.lower():
         metric = f"{stamp} · {metric}"
@@ -521,20 +568,35 @@ def _segment_line(facts: list[SummaryFact]) -> str:
         parts.append(
             " ".join(f"{group} {value}".split()) + (f", {change}" if change.strip() else "")
         )
-    measure = _measure(facts[0])
+    measure = format_fact(
+        replace(facts[0], metric=_measure(facts[0]), group="", period="")
+    ).partition(": ")[0]
     measure = measure[:1].upper() + measure[1:]
     return f"🔹 **{measure} by segment**: " + "; ".join(parts)
 
 
 def _results_lines(facts: list[SummaryFact]) -> list[str]:
     def key(fact: SummaryFact) -> str:
-        return _measure(fact).casefold() if fact.group.strip() else ""
+        if not fact.group.strip() or not _measure(fact):
+            return ""
+        return "\x1f".join(
+            (
+                _measure(fact).casefold(),
+                _basis_key(fact.basis),
+                fact.unit.casefold(),
+                fact.currency,
+            )
+        )
 
     measures: dict[str, list[SummaryFact]] = {}
     for fact in facts:
         if fact.kind == "segment" and key(fact):
             measures.setdefault(key(fact), []).append(fact)
-    merged = {k: group for k, group in measures.items() if len({_scope(f) for f in group}) >= 2}
+    merged = {
+        k: group
+        for k, group in measures.items()
+        if len({_scope(f) for f in group}) >= 2 and len({_scope(f) for f in group}) == len(group)
+    }
     # A growth rate given on its own joins its segment's level ("Wealth Solutions DE growth")
     for fact in facts:
         group = merged.get(key(fact))
@@ -559,8 +621,8 @@ def _results_lines(facts: list[SummaryFact]) -> list[str]:
 
 
 def discord_brief(facts: list[SummaryFact]) -> str:
-    """The card's highlights, in the layout the user reviewed ("**Q3 2026 · Results**",
-    🔹 figures, 🔸 business updates), most important first:
+    """The card's highlights, with the reporting period implicit for current results,
+    🔹 figures and 🔸 business updates, most important first:
 
     - the quarter's headline results (the model marks each fact's role);
     - the outlook;
@@ -569,7 +631,7 @@ def discord_brief(facts: list[SummaryFact]) -> str:
     - results for other periods (year to date, trailing twelve months);
     - business updates, under one heading.
     """
-    facts = [with_change(fact) for fact in facts]
+    facts = combine_duplicates([with_change(fact) for fact in facts])
     # The consolidated company named as a "segment" on most lines repeats on every line
     groups = Counter(" ".join(f.group.split()) for f in facts if f.group.strip())
     if groups:
@@ -632,7 +694,13 @@ def discord_brief(facts: list[SummaryFact]) -> str:
             lines = _results_lines(group)
         else:
             lines = [_line(f, "🔹") for f in group]
-        blocks.append(f"**{f'{stamp} · {kind}'.strip(' ·')}**\n" + "\n".join(lines))
+        implicit = (
+            kind in ("Results", "More results")
+            and stamp == main
+            and re.fullmatch(r"(?:Q[1-4] (?:FY)?20\d{2}|FY20\d{2})", stamp)
+        )
+        heading_stamp = "" if implicit else stamp
+        blocks.append(f"**{f'{heading_stamp} · {kind}'.strip(' ·')}**\n" + "\n".join(lines))
     return "\n\n".join(blocks)
 
 
