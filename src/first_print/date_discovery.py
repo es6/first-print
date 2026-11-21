@@ -21,6 +21,7 @@ from first_print.browser import BrowserError, RenderedPage
 from first_print.browser_sources import IRSource
 from first_print.cache_research import CHECKING_CACHE, CacheResult, CacheRoute, probe_cache
 from first_print.calendar import Calendar, Tracked, describe, same_release
+from first_print.consensus_prefetch import ConsensusPrefetch
 from first_print.driver_profiles import DriverProfiles
 from first_print.fetch import Fetcher, Response
 from first_print.formatting import clock, day, period_label
@@ -56,6 +57,7 @@ from first_print.known import (
     planned_period,
     to_target,
 )
+from first_print.newsroom_discovery import merge_rooms
 from first_print.periods import title_period
 from first_print.quarterly_table import quarter_pdf
 from first_print.recorder import ET, PollError, Target, poll
@@ -859,6 +861,7 @@ class DateDiscovery:
     ) -> None:
         self.calendar, self.fetcher, self.now = calendar, fetcher, now
         self.profiles: DriverProfiles | None = None
+        self.consensus: ConsensusPrefetch | None = None
         # `busy` pauses all research: the minutes around a release. Outside them, research
         # continues during open windows in the background (Fetcher.background), never for a
         # company whose own window is open, and with Chrome only while no live window uses it.
@@ -942,6 +945,8 @@ class DateDiscovery:
                         await self._prepare_cache(current)
                     if self.profiles and (current := self.calendar.find(row.ticker)):
                         await self.profiles.ensure(current, self.now())
+                    if self.consensus and (current := self.calendar.find(row.ticker)):
+                        await self.consensus.ensure(current, self.now())
         except Exception:
             log.exception("Date discovery failed for %s", row.ticker)
             self._phase(row.cik, "Research failed. Retrying in an hour.")
@@ -1303,6 +1308,14 @@ class DateDiscovery:
                     "rss_canonical": [url for url in row.target.rss_canonical if url in feeds],
                 }
             )
+        target = target.model_copy(
+            update={
+                "newsrooms": merge_rooms(
+                    target.newsrooms,
+                    [item.route() for item in row.company.newsrooms if item.enabled],
+                )
+            }
+        )
         if row.company.sec_form == "6-K" and target.sec_form != "6-K":
             target = target.model_copy(update={"sec_form": "6-K"})
         if evidence != MANUAL:

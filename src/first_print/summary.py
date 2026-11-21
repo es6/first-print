@@ -4,13 +4,15 @@ the release and lays out the ones it confirms."""
 import asyncio
 import hashlib
 import json
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from typing import Any
 
 import anthropic
 
 from first_print.config import Settings
+from first_print.consensus import attach_estimates
 from first_print.source_document import SourceDocument, document_from_text
+from first_print.sources import published_time
 from first_print.summary_binding import bind_answer
 from first_print.summary_bound_format import render_bound
 from first_print.summary_format import discord_brief
@@ -31,15 +33,26 @@ TIMEOUT_SECONDS = 120.0
 @dataclass(frozen=True)
 class Summary:
     text: str
-    unverified: list[str]  # facts held back because the release didn't confirm them
+    unverified: list[str]  # validation refusals and trimmed components, not proven source errors
     seconds: float
     input_tokens: int
     output_tokens: int
     evidence: str | None = None  # candidate, bound references and request provenance
+    validation: str = "legacy"
 
 
 class SummaryError(Exception):
-    pass
+    def __init__(self, message: str, *, evidence: str | None = None) -> None:
+        super().__init__(message)
+        self.evidence = evidence
+
+
+def _document_evidence(evidence: str | None, document: SourceDocument) -> str | None:
+    if evidence is None:
+        return None
+    data = json.loads(evidence)
+    data["document_sha256"] = document.sha256
+    return json.dumps(data, ensure_ascii=False)
 
 
 def summarizer_from(settings: Settings) -> "Summarizer | None":
@@ -58,6 +71,7 @@ def _fact(line: dict[str, Any]) -> SummaryFact:
         **{
             name.name: str(line.get(name.name) or ("actual" if name.name == "kind" else ""))
             for name in fields(SummaryFact)
+            if name.name not in ("estimate", "estimate_result")
         }
     )
 
@@ -98,11 +112,16 @@ class Summarizer:
         if self.verified:
             # The release as read, tables included, is what the facts are checked against
             return await self._write_facts(ticker, document.text, seconds, context, document)
-        return (
-            await self.write(ticker, document.text, seconds, context=context)
-            if context
-            else await self.write(ticker, document.text, seconds)
-        )
+        try:
+            result = (
+                await self.write(ticker, document.text, seconds, context=context)
+                if context
+                else await self.write(ticker, document.text, seconds)
+            )
+        except SummaryError as error:
+            error.evidence = _document_evidence(error.evidence, document)
+            raise
+        return replace(result, evidence=_document_evidence(result.evidence, document))
 
     async def write(
         self,
@@ -128,46 +147,80 @@ class Summarizer:
         context: dict[str, Any] | None,
         document: SourceDocument | None,
     ) -> Summary:
-        # No consensus estimates: the tested setting had none, and the brief never calls a beat
-        # or miss without a matching estimate
+        # Estimates never enter the model prompt. Only verified facts can receive an exact,
+        # deterministic comparison fetched before both the window and a source publication time.
+        snapshot = (context or {}).get("consensus_snapshot")
+        published = published_time((context or {}).get("release_published_at"))
+        writer_context = {
+            k: v
+            for k, v in (context or {}).items()
+            if k not in ("consensus_snapshot", "release_published_at")
+        }
         try:
-            request = structured_request(ticker, release, context)
+            request = structured_request(ticker, release, writer_context or None)
         except ValueError as error:
             raise SummaryError(str(error)) from error
         message = await self._generate(request)
         answer = self._answer(message)
+        source = document or document_from_text(release)
+        evidence: dict[str, Any] = {
+            "version": "fact-summary/1",
+            "document_sha256": source.sha256,
+            "source_text_sha256": hashlib.sha256(release.encode("utf-8")).hexdigest(),
+            "request_sha256": hashlib.sha256(
+                json.dumps(request, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "model": request["model"],
+            "effort": request["output_config"]["effort"],
+            "raw_answer": answer,
+            "stop_reason": message.stop_reason,
+            "accepted": [],
+            "rejected": [],
+        }
+
+        def failed(reason: str) -> SummaryError:
+            return SummaryError(reason, evidence=json.dumps(evidence, ensure_ascii=False))
+
+        if message.stop_reason != "end_turn":
+            raise failed(f"{WRITER} returned an unfinished or refused fact answer")
         try:
             lines = json.loads(answer)["lines"]
             facts = [_fact(line) for line in lines if isinstance(line, dict)]
         except (json.JSONDecodeError, KeyError, TypeError) as error:
-            raise SummaryError(
+            raise failed(
                 f"{WRITER} returned no usable facts (stop reason {message.stop_reason})"
             ) from error
         # Verified mode binds every kept figure to the release, so a badly quoted one can try
         accepted, rejected = validate_facts(facts, release, unquoted=self.verified)
+        evidence["rejected"] = rejected
         if not accepted:
-            raise SummaryError(
-                f"none of {WRITER}'s {len(facts)} facts could be confirmed in the release"
-            )
+            raise failed(f"none of {WRITER}'s {len(facts)} facts could be confirmed in the release")
         if self.verified:
-            try:
-                source = document or document_from_text(release)
-            except ValueError as error:
-                raise SummaryError(str(error)) from error
             # Up to about a second of parsing on a large release (measured 0.26 s median):
             # off the event loop, which also carries other releases' alerts
             accepted, dropped = await asyncio.to_thread(verify_facts, accepted, source)
             rejected = [*rejected, *dropped]
+            evidence["rejected"] = rejected
             if not accepted:
-                raise SummaryError(
+                raise failed(
                     f"the release confirmed none of {WRITER}'s facts' measure, period and basis"
                 )
+        evidence["accepted"] = [asdict(fact) for fact in accepted]
+        if self.verified and isinstance(snapshot, dict):
+            accepted = await asyncio.to_thread(
+                attach_estimates, accepted, source, snapshot, ticker=ticker, published_at=published
+            )
+            evidence["consensus_snapshot"] = snapshot
+            evidence["consensus_publication_cutoff"] = published.isoformat() if published else None
+            evidence["displayed"] = [asdict(fact) for fact in accepted]
         return Summary(
             text=discord_brief(accepted),
             unverified=rejected,
             seconds=seconds,
             input_tokens=message.usage.input_tokens,
             output_tokens=message.usage.output_tokens,
+            evidence=json.dumps(evidence, ensure_ascii=False),
+            validation="source-values/1" if self.verified else "quote-check/1",
         )
 
     async def _generate(self, request: dict[str, Any]) -> anthropic.types.Message:
@@ -180,8 +233,6 @@ class Summarizer:
             raise SummaryError(reason) from error
         except anthropic.APIConnectionError as error:
             raise SummaryError(f"couldn't reach the {WRITER} API: {error}") from error
-        if message.stop_reason == "refusal":
-            raise SummaryError(f"{WRITER} declined to write this summary")
         return message
 
     @staticmethod
@@ -191,6 +242,11 @@ class Summarizer:
     async def _write_referenced(
         self, ticker: str, document: SourceDocument, seconds: float, context: dict[str, Any] | None
     ) -> Summary:
+        context = {
+            k: v
+            for k, v in (context or {}).items()
+            if k not in ("consensus_snapshot", "release_published_at")
+        } or None
         try:
             request = referenced_request(ticker, document, context)
         except ValueError as error:
@@ -205,7 +261,7 @@ class Summarizer:
             raise SummaryError(f"{WRITER} returned no usable source references") from error
         if not report.facts:
             raise SummaryError(f"none of {WRITER}'s facts could be bound to the source document")
-        evidence = {
+        evidence: dict[str, Any] = {
             "version": "bound-summary/1",
             "document_sha256": document.sha256,
             "request_sha256": hashlib.sha256(
@@ -229,4 +285,5 @@ class Summarizer:
             input_tokens=message.usage.input_tokens,
             output_tokens=message.usage.output_tokens,
             evidence=json.dumps(evidence, ensure_ascii=False),
+            validation="source-references/1",
         )
