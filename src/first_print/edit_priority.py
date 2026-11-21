@@ -9,6 +9,8 @@ from collections.abc import AsyncIterator, Coroutine
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from typing import Any
 
+from first_print.task_lifetime import finish_owned
+
 
 class CardDeferred(Exception):
     """A release step started while a scorecard request was out, so the card request was
@@ -33,7 +35,8 @@ class EditPriority:
     async def release(self) -> AsyncIterator[None]:
         self._releases += 1
         for task in self._cards:
-            task.cancel()
+            if not task.cancelling():
+                task.cancel()
         try:
             yield
         finally:
@@ -50,9 +53,13 @@ class EditPriority:
         try:
             await asyncio.wait({task})
         finally:
-            self._cards.discard(task)
-            if not task.done():
-                task.cancel()  # this caller was cancelled
+            try:
+                if not task.done():
+                    if not task.cancelling():
+                        task.cancel()
+                    await finish_owned(task)
+            finally:
+                self._cards.discard(task)
         if task.cancelled():
             raise CardDeferred
         return task.result()

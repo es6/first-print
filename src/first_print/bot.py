@@ -14,7 +14,8 @@ from first_print.commands import ALL_COMMANDS
 from first_print.config import Settings
 from first_print.pipeline import watch_schedule
 from first_print.recorder import load_plan
-from first_print.summary import summarizer_from
+from first_print.summary import Summarizer, summarizer_from
+from first_print.task_lifetime import finish_owned
 from first_print.tracking_commands import TrackingCommands
 from first_print.unattended import DirectoryWatcher, watch_directory
 from first_print.version import build_revision, release_version
@@ -34,6 +35,7 @@ class EarningsBot(discord.Client):
             self.tree.add_command(command)
         self.watcher: asyncio.Task[None] | None = None
         self.directory_watcher: DirectoryWatcher | None = None
+        self._shutdown_task: asyncio.Task[None] | None = None
         self.tree.add_command(
             app_commands.Command(
                 name="status",
@@ -121,7 +123,30 @@ class EarningsBot(discord.Client):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, release_version())
 
+    async def close(self) -> None:
+        """Drain the watcher and its clients before closing the Discord transport."""
+        if self._shutdown_task is None:
+            self._shutdown_task = asyncio.create_task(self._shutdown())
+        await finish_owned(self._shutdown_task)
+
+    async def _shutdown(self) -> None:
+        try:
+            if self.watcher is not None and not self.watcher.done():
+                if not self.watcher.cancelling():
+                    self.watcher.cancel()
+                await asyncio.gather(self.watcher, return_exceptions=True)
+        finally:
+            await super().close()
+
     async def _watch(self, schedule: Path) -> None:
+        summarizer = summarizer_from(self.settings)
+        try:
+            await self._watch_running(schedule, summarizer)
+        finally:
+            if summarizer is not None:
+                await summarizer.close()
+
+    async def _watch_running(self, schedule: Path, summarizer: Summarizer | None) -> None:
         settings = self.settings
         if settings.discord_channel_id is None or settings.sec_user_agent is None:
             raise RuntimeError("DISCORD_CHANNEL_ID and SEC_USER_AGENT are required")
@@ -130,7 +155,6 @@ class EarningsBot(discord.Client):
         if not isinstance(channel, discord.abc.Messageable):
             raise RuntimeError(f"Channel {settings.discord_channel_id} can't take messages")
         fmp_key = settings.fmp_api_key
-        summarizer = summarizer_from(settings)
         api_key = fmp_key.get_secret_value() if fmp_key else None
         # Reading the channel is about the cheapest request there is, and goes over the same
         # connection the alert will use
