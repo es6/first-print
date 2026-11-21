@@ -17,7 +17,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from decimal import Decimal, InvalidOperation
 
-from first_print.binding_text import CARDINALS, cardinal_tokens, number_tokens
+from first_print.binding_text import CARDINALS, cardinal_tokens, number_tokens, unit_kind
 from first_print.source_document import SourceDocument
 from first_print.summary_binding import bind_brief, bound_scope, release_bases
 from first_print.summary_evidence import (
@@ -42,7 +42,9 @@ _SCALES = {
 }
 _FACTOR = {"one": 1, "thousand": 10**3, "million": 10**6, "billion": 10**9, "trillion": 10**12}
 _NUMBER = re.compile(
-    r"(?P<neg>[-\u2212\u2013]|\()?\s*[$€£¥]?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<neg>[-\u2212\u2013(]|negative\s+|minus\s+)?\s*"
+    r"(?:(?:USD|EUR|GBP|CAD|JPY|RMB|CNY|AUD|CHF|SEK|INR|BRL|US)\s*)?"
+    r"[$€£¥]?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*"
     r"(?P<scale>trillion|billion|million|thousand|bn|mn|[tbmk](?![a-z]))?",
     re.IGNORECASE,
 )
@@ -50,7 +52,7 @@ _NUMBER = re.compile(
 DASHES = ("-", "\u2212", "\u2013", "(")
 _QUALIFIERS = (
     (("approximately", "about", "~", "roughly", "around"), "approximately"),
-    (("more than", "in excess of", "over ", ">", "above"), "more_than"),
+    (("more than", "in excess of", "over ", ">", "above", "exceeded", "exceeding"), "more_than"),
     (("nearly", "almost"), "nearly"),
     (("at least",), "at_least"),
     (("less than", "under ", "below", "<"), "less_than"),
@@ -90,9 +92,10 @@ def parse(text: str) -> tuple[str, str | None, str, str] | None:
     amounts, scale = [], "one"
     for index, match in enumerate(found):
         # A dash between two numbers is a range, not a minus; a parenthesis is always one
-        negative = match["neg"] in DASHES and (
-            index == 0 or len(found) == 1 or match["neg"] == "(" or worded
+        signed = match["neg"] in DASHES or bool(
+            match["neg"] and match["neg"].strip().casefold() in ("negative", "minus")
         )
+        negative = signed and (index == 0 or len(found) == 1 or match["neg"] == "(" or worded)
         amounts.append(("-" if negative else "") + match["num"].replace(",", ""))
         if match["scale"]:
             scale = _SCALES[match["scale"].casefold()]
@@ -115,7 +118,11 @@ def _several(value: str) -> bool:
 def unit_of(fact: SummaryFact, value: str) -> str:
     value = _TOLERANCE.sub("", value)  # "$108.0 billion, plus or minus 2%" is money
     text = f"{value} {fact.unit}".casefold()
-    if "bps" in text or "basis point" in text:
+    if (
+        "bps" in text
+        or "basis point" in text
+        or re.search(r"percentage points?|\bpp\b", value, re.IGNORECASE)
+    ):
         return "bps"
     if "%" in text or "percent" in text:
         return "%"
@@ -223,7 +230,14 @@ def sourced(
         return None
     amount, upper, scale, qualifier = parsed
     unit = unit_of(fact, value)
-    named = re.fullmatch(r"\s*(trillion|billion|million|thousand)s?\s*", fact.unit, re.IGNORECASE)
+    if re.search(r"percentage points?|\bpp\b", value, re.IGNORECASE):
+        amount = str(Decimal(amount) * 100)
+        upper = str(Decimal(upper) * 100) if upper is not None else None
+    named = (
+        re.search(r"\b(trillion|billion|million|thousand)s?\b", fact.unit, re.IGNORECASE)
+        if unit_kind(fact.unit) == "money" and not re.search(r"\d|/|ratio", fact.unit)
+        else None
+    )
     if scale == "one" and unit == "money" and named:
         # The scale given as the unit: ASML's "14.2-15.2" in "billion" (EUR)
         scale = named[1].casefold()
@@ -270,7 +284,11 @@ def candidate(fact: SummaryFact, document: SourceDocument) -> ReferencedFact | N
     guide = kind == "guide"
     main = sourced(fact, fact.value, document) if fact.value.strip() else None
     stated = fact.comparison if fact.comparison in ("YoY", "QoQ", "versus prior guidance") else ""
-    growth = sourced(fact, fact.change, document, stated or "YoY") if "%" in fact.change else None
+    growth = (
+        sourced(fact, fact.change, document, stated)
+        if re.search(r"%|\bpp\b|percentage points?", fact.change, re.IGNORECASE)
+        else None
+    )
     if not guide and main is not None and _rate_of_growth(fact):
         # "Global eCommerce sales growth: 23%" is a growth rate, not a level: it is checked
         # as one, where the release says the measure grew by it

@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
-POLICY_VERSION = "2026-11-12.1"
+POLICY_VERSION = "2026-11-20.2"
 
 
 # These are the settings actually tested in the November prototype, not model aliases.
@@ -32,6 +32,23 @@ Each selected fact should explain performance, outlook, risk or a material devel
 A metric's name or sector alone does not establish
 its importance. Avoid both a fixed checklist and a blanket blacklist of financial topics.
 
+Selection review before returning the brief:
+- Rank what the issuer leads with, the drivers of the headline result, and material changes
+  in the outlook or business ahead of supporting statement rows. Include the useful measure
+  and its comparable growth together. A longer release does not require a longer checklist.
+- Choose the profit measure investors use for this business. When adjusted and reported
+  measures tell the same performance story, prefer the emphasized measure. Add the other
+  basis only when its difference has a material explanation; show that explanation rather
+  than filling the brief with parallel reported/adjusted rows and margin assumptions.
+- Ask what each additional fact changes for the reader beyond the facts already selected.
+  Routine cash balances, individual cost rows, forecasts' supporting assumptions and routine
+  partnership announcements need a current earnings, funding or adoption consequence.
+  They can be important here; their presence in a table alone does not make them important.
+- Combine a bare KPI with its richer level-plus-growth version and avoid repeating a
+  dividend, authorization or acquisition in both results and updates. Different bases,
+  periods, businesses, new authorizations and remaining authorizations are distinct claims.
+
+
 Coverage:
 - Lead with the financial measures that explain this business's performance. Revenue with
   comparable growth is often essential, but it is not a compulsory slot: a fee-driven
@@ -40,6 +57,9 @@ Coverage:
   Choose the company's relevant profit measure:
   adjusted EPS, operating profit, EBITDA or another measure emphasized in its results.
   EPS is optional. Do not silently substitute GAAP for adjusted or vice versa.
+  A loss-making company still needs a material loss/profitability measure; revenue and
+  gross margin alone can hide its funding story. A regional unit-economics milestone
+  does not establish company profitability.
 - Material revenue segments, largest first, grouped compactly;
   include a small but important growth engine and recurring fee/subscription streams.
   Preserve the revenue taxonomy. Expense rows are not segments. Product and operating
@@ -69,6 +89,10 @@ Coverage:
   news rather than banning them. For distorted profit, explain material one-off effects
   (including a per-share effect if given). Deprioritize investment marks unless investing
   is the business or the mark is necessary to explain the headline profit distortion.
+  Check for a material CEO/CFO transition, new or enlarged buyback authorization, dividend
+  change, acquisition or restructuring before selecting routine product announcements.
+  Preserve the change, status, magnitude and timing actually supplied. An authorization
+  increase is not the remaining balance, and an agreement is not a completed acquisition.
 - Judge funding, bond issues, restructuring and acquisition updates by their significance
   here, not their topic label. Explain what changes in earnings power, risk, capacity or
   financing. A routine amount without a consequence is often less useful than a business KPI;
@@ -90,11 +114,17 @@ Evidence and arithmetic:
 - When acquisitions, FX or timing materially change the headline comparison, preserve the
   reported and issuer-supplied comparable views and their exact exclusions. Do not call an
   ex-acquisition figure organic unless the issuer does. Explain material cash timing effects.
+  For acquisition-led growth, consider reported growth, the issuer's organic/comparable
+  growth and acquisition contributions together. Count, spend and backlog added can matter
+  for serial acquisitions; do not substitute an unrelated EPS row for those operating drivers.
 - For a material acquisition, consider earnings-power effects, synergy amount and timing,
   reinvestment, funding and dilution together. A synergy target is not immediate accretion.
 - Business updates need a consequence for adoption, monetization, capacity, earnings or risk.
   Do not fill an updates slot with routine launches or accounting disclosures. A usage milestone
-  can outrank a product announcement when it demonstrates business traction. Retain meaningful
+  can outrank a product announcement when it demonstrates business traction. Preserve
+  meaningful monetization, overseas/product revenue and fleet/delivery scale when they
+  explain the business; do not replace them with a generic launch or a cash-runway quote.
+  Retain meaningful
   constraints and next steps in a capacity/demand outlook, not just its headline.
 - Never invent consensus or call a figure a beat/miss without a supplied, matching estimate.
   Missing information is missing, not zero. Omit an ambiguous fact or flag it for review.
@@ -121,6 +151,9 @@ class SummaryFact:
     role: str = ""
     relevance: str = ""
     comparison: str = ""
+    # Deterministic display metadata from the pre-window cache, never model-supplied.
+    estimate: str = ""
+    estimate_result: str = ""
 
 
 _PERIOD = re.compile(
