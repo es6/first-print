@@ -20,6 +20,7 @@ from first_print.summary_policy import EMBER, SummaryFact
 from first_print.summary_request import referenced_request, structured_request
 from first_print.summary_validation import validate_facts
 from first_print.summary_verify import verify_facts
+from first_print.task_lifetime import finish_owned
 
 MODEL = EMBER.model
 EFFORT = EMBER.effort
@@ -90,6 +91,7 @@ class Summarizer:
     ) -> None:
         self.references = references
         self.verified = verified
+        self._close_task: asyncio.Task[None] | None = None
         # One retry at most: a later source's text can start its own attempt
         self.client = anthropic.AsyncAnthropic(
             api_key=api_key,
@@ -97,6 +99,12 @@ class Summarizer:
             max_retries=0 if references else 1,
             timeout=TIMEOUT_SECONDS,
         )
+
+    async def close(self) -> None:
+        """Close the shared writer/profile transport once, after its users have stopped."""
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self.client.close())
+        await finish_owned(self._close_task)
 
     async def write_document(
         self,
