@@ -125,9 +125,17 @@ class EarningsBot(discord.Client):
 
     async def close(self) -> None:
         """Drain the watcher and its clients before closing the Discord transport."""
+        await finish_owned(self._start_shutdown())
+
+    def _start_shutdown(self) -> asyncio.Task[None]:
         if self._shutdown_task is None:
             self._shutdown_task = asyncio.create_task(self._shutdown())
-        await finish_owned(self._shutdown_task)
+            self._shutdown_task.add_done_callback(self._shutdown_ended)
+        return self._shutdown_task
+
+    def _shutdown_ended(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()):
+            log.error("Bot shutdown failed", exc_info=error)
 
     async def _shutdown(self) -> None:
         try:
@@ -237,4 +245,4 @@ class EarningsBot(discord.Client):
             log.error("Watching the schedule stopped", exc_info=error)
             if self.directory_mode:
                 # Let the Windows supervisor restart the entire process.
-                asyncio.create_task(self.close())  # noqa: RUF006
+                self._start_shutdown()

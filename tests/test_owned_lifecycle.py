@@ -188,3 +188,22 @@ async def test_bot_close_drains_watcher_before_discord_even_if_close_caller_is_c
         finish.set()
         bot.watcher.cancel()
         await asyncio.gather(bot.watcher, caller, return_exceptions=True)
+
+
+async def test_watcher_failure_starts_an_owned_shutdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bot = EarningsBot(Settings.model_validate({"discord_token": "fake"}), tmp_path)
+    closed = AsyncMock()
+    monkeypatch.setattr(discord.Client, "close", closed)
+
+    async def failed() -> None:
+        raise ValueError("fixture watcher failure")
+
+    bot.watcher = asyncio.create_task(failed())
+    await asyncio.gather(bot.watcher, return_exceptions=True)
+    bot._watch_ended(bot.watcher)
+    assert bot._shutdown_task is not None
+    await bot.close()
+    closed.assert_awaited_once()
