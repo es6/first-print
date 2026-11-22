@@ -122,7 +122,7 @@ async def _q4_document(
         for release in releases:
             if isinstance(release, dict) and str(release.get("PressReleaseId")) == release_id:
                 body = release.get("Body")
-                if isinstance(body, str) and (document := await _usable_document(body)):
+                if isinstance(body, str) and (document := await _usable_document(body, fetcher)):
                     return document
     return None
 
@@ -230,16 +230,16 @@ async def release_document(
             # one only when no page has delivered the text. Brookfield's HTML came 4 minutes
             # after its PDF.
             if sighting.body.startswith(b"%PDF-"):
-                text = await asyncio.to_thread(pdf_text, sighting.body)
+                text = await fetcher.run_parser(pdf_text, sighting.body)
                 return (
-                    await asyncio.to_thread(document_from_text, text)
+                    await fetcher.run_parser(document_from_text, text)
                     if verified_report(text)
                     else None
                 )
             html = sighting.body.decode(errors="replace")
             if sighting.details.get("verified_exhibit") == "true":
                 # Already parsed by the classifier; do not reinterpret text as HTML.
-                return await asyncio.to_thread(document_from_text, html)
+                return await fetcher.run_parser(document_from_text, html)
         elif isinstance(source, Q4PressReleases):
             return await _q4_document(fetcher, source, sighting.key)
         elif isinstance(source, BroadcomNewsroom):
@@ -266,16 +266,22 @@ async def release_document(
             return None
     except (aiohttp.ClientError, TimeoutError, ValueError, KeyError, TypeError):
         return None
-    return await _usable_document(html)
+    return await _usable_document(html, fetcher)
 
 
-async def _usable_document(html: str | None) -> SourceDocument | None:
-    # Parsing an 8-K exhibit takes about 30 ms of pure Python. In a thread, the event loop gets
-    # the interpreter back every few milliseconds, so other windows' polls don't wait on it.
+async def _usable_document(
+    html: str | None, fetcher: Fetcher | None = None
+) -> SourceDocument | None:
+    # Bound concurrent parsers when the caller owns a fetcher. Standalone text conversion
+    # retains its existing helper interface without creating a network client.
     if not html:
         return None
     try:
-        document = await asyncio.to_thread(document_from_html, html)
+        document = (
+            await fetcher.run_parser(document_from_html, html)
+            if fetcher is not None
+            else await asyncio.to_thread(document_from_html, html)
+        )
     except ValueError:
         return None
     return document if len(document.text) >= MIN_RELEASE_CHARS else None
