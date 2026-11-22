@@ -39,14 +39,8 @@ from first_print.formatting import (
 from first_print.globe_frontier import GlobeBatch, run_batch
 from first_print.investigate import wire_seen, with_wire
 from first_print.issuers import Issuers
-from first_print.pipeline import (
-    DiscordPoster,
-    DurableDiscordPoster,
-    Poster,
-    Releases,
-    fan_out,
-    keep_warm,
-)
+from first_print.pipeline import Releases, keep_warm
+from first_print.posters import DiscordPoster, DurableDiscordPoster, Poster, fan_out
 from first_print.publication_trials import TRIALS_FOLDER, TRIALS_STATE, load_plans, run_trials
 from first_print.recorder import (
     DEGRADED_AFTER,
