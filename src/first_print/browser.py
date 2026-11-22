@@ -1,4 +1,4 @@
-"""A schedule-scoped stock Chrome worker for the Windows IR trial."""
+"""Shared desktop Chrome for issuer research and release monitoring."""
 
 from __future__ import annotations
 
