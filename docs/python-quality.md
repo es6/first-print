@@ -137,6 +137,7 @@ outputs and known-wrong controls before changing rule order or acceptance behavi
 | Shared polling | Each `SharedPoll` member owns its deadline; the last member cancels and drains the polling worker |
 | Headline reads | `Releases` observes failures and cancels and gathers outstanding reads when the target or watcher finishes |
 | Host pacing | `Fetcher` cancels queued turns and drains dispatchers before closing the HTTP session |
+| Release parsing | `Fetcher.run_parser` shares a small parser limit across its release reads; cancellation retains running thread work, and close cancels queued reads and drains active work |
 | Chrome | The fetcher holds leases for research and active reads; idle scans close only when there are no holders |
 | Downloads and release steps | `Release` retains tasks; `FileDownloads` shares successful bytes and drains workers at release completion |
 | Scorecard request | `EditPriority.card` retains the request through cancellation cleanup; release work can preempt it |

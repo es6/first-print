@@ -24,6 +24,7 @@ from first_print.browser import (
     DesktopChrome,
     RenderedPage,
 )
+from first_print.task_lifetime import finish_owned
 
 # Research during an open release window runs in the background (see Fetcher.background): it
 # waits behind every poll, never asks a host a window is polling, and asks SEC, which every
@@ -31,6 +32,8 @@ from first_print.browser import (
 BACKGROUND_SEC_GAP = 2.0
 # A host that answered a window's poll this recently is being watched
 LIVE_SECONDS = 30.0
+# Bound competing Python parsers so a burst cannot monopolize the interpreter.
+PARSER_WORKERS = 2
 
 
 @dataclass(frozen=True)
@@ -216,6 +219,40 @@ class Fetcher:
         self._live: dict[str, float] = {}  # by queue_key: when a poll last took a turn
         self._background_next: dict[str, float] = {}  # by queue_key: next background turn
         self._background_locks: dict[str, asyncio.Lock] = {}
+        self._parser_slots = asyncio.Semaphore(PARSER_WORKERS)
+        self._parser_callers: set[asyncio.Task[object]] = set()
+        self._parsers_closed = False
+
+    async def run_parser[T, **P](
+        self, reader: Callable[P, T], *args: P.args, **kwargs: P.kwargs
+    ) -> T:
+        """Run a synchronous parser in shared bounded slots; finish it before cancellation.
+
+        A cancelled thread cannot be stopped. Retain its caller and slot until it finishes;
+        closing the fetcher also cancels queued callers and drains running parses.
+        """
+        if self._parsers_closed:
+            raise RuntimeError("The fetcher's parsers are closed")
+        caller = asyncio.current_task()
+        if caller is None:
+            raise RuntimeError("A parser requires an asyncio task")
+        self._parser_callers.add(caller)
+        try:
+            async with self._parser_slots:
+                if self._parsers_closed:
+                    raise RuntimeError("The fetcher's parsers are closed")
+                worker = asyncio.create_task(asyncio.to_thread(reader, *args, **kwargs))
+                return await finish_owned(worker)
+        finally:
+            self._parser_callers.discard(caller)
+
+    async def _close_parsers(self) -> None:
+        self._parsers_closed = True
+        callers = tuple(task for task in self._parser_callers if task is not asyncio.current_task())
+        for task in callers:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*callers, return_exceptions=True)
 
     def route_pause(self, route: str) -> RoutePause:
         """The pause shared by every loop that polls `route`, such as an IR listing's URL."""
@@ -228,6 +265,7 @@ class Fetcher:
 
     async def __aenter__(self) -> Self:
         self._created_at = time.monotonic()
+        self._parsers_closed = False
         self._session = aiohttp.ClientSession(
             timeout=self._timeout,
             max_line_size=MAX_HEADER_BYTES,
@@ -239,7 +277,10 @@ class Fetcher:
 
     async def __aexit__(self, *exc_info: object) -> None:
         try:
-            await self.close_browser()
+            try:
+                await self._close_parsers()
+            finally:
+                await self.close_browser()
         finally:
             dispatchers = []
             for queue in self._queues.values():

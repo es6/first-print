@@ -4,7 +4,6 @@ This is body recovery after a wire sighting, not a discovery or early-publicatio
 Every candidate must identify the exact wire ID and headline inside its article.
 """
 
-import asyncio
 import re
 from dataclasses import replace
 from datetime import datetime
@@ -135,7 +134,9 @@ async def recover(fetcher: Fetcher, item: Sighting) -> SourceDocument | None:
         if response.status != 200:
             return None
         pause.answered()
-        return await asyncio.to_thread(_document, response.body.decode(errors="replace"), item, url)
+        return await fetcher.run_parser(
+            _document, response.body.decode(errors="replace"), item, url
+        )
     return None
 
 
