@@ -105,6 +105,13 @@ The [architecture overview](architecture.md#overview) shows how the workflows co
 `DateDiscovery._check` coordinates research, bounded route preparation and plan commit.
 `_find_date` defines evidence precedence; `_missing_date` explains an unresolved date.
 The coordinator retains the busy, deadline and stale-row checks around asynchronous work.
+Issuer investigation separates `_results_history` (SEC form and prior reports) from IR-route
+discovery and `_select_sources` (the final persisted profile). The coordinator preserves their
+order and the shared report of findings.
+
+`watch_directory` constructs the stores, transport, watcher and auxiliary services inside their
+resource scopes. `_run_watcher` starts and drains the services while the prepared watcher runs;
+the enclosing scopes close resources only after those tasks finish.
 
 `posters` owns Discord transport, durable message recovery and fanout; `pipeline` owns release
 orchestration. `Poster` is their interface. Compatibility imports remain in `pipeline` for
@@ -118,7 +125,7 @@ order and fail-closed evidence checks visible when changing those modules.
 | Work or resource | Owner and completion |
 |---|---|
 | Watcher and summary client | `EarningsBot` drains its watcher before Discord closes; `_watch` closes its summarizer in `finally` |
-| Window and research tasks | `DirectoryWatcher.run` cancels and gathers windows, trials and date discovery; `watch_directory` drains its auxiliary tasks |
+| Window and research tasks | `DirectoryWatcher.run` cancels and gathers windows, trials and date discovery; `_run_watcher` drains auxiliary services before `watch_directory` closes resources |
 | Shared polling | Each `SharedPoll` member owns its deadline; the last member cancels and drains the polling worker |
 | Headline reads | `Releases` observes failures and cancels and gathers outstanding reads when the target or watcher finishes |
 | Host pacing | `Fetcher` cancels queued turns and drains dispatchers before closing the HTTP session |

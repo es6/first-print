@@ -5,7 +5,7 @@ import contextlib
 import re
 import sqlite3
 import tomllib
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -892,6 +892,19 @@ async def replace_start_notice(
             await (earlier or await channel.fetch_message(message_id)).delete()
 
 
+async def _run_watcher(
+    watcher: DirectoryWatcher, services: Sequence[Callable[[], Coroutine[Any, Any, None]]]
+) -> None:
+    """Run the prepared watcher; settle its auxiliary services before resources close."""
+    tasks = [asyncio.create_task(start()) for start in services]
+    try:
+        await watcher.run()
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 async def watch_directory(
     directory: Path,
     channel: discord.abc.Messageable,
@@ -1087,17 +1100,12 @@ async def watch_directory(
             watcher.progress = servers[0].progress
             ready(watcher)
             status(f"{STARTED} · {release_version()} · `{directory.name}/`", start=True)
-            tasks = [
-                asyncio.create_task(recover_pending()),
-                *(asyncio.create_task(s.progress.run()) for s in servers if s.progress),
+            services: list[Callable[[], Coroutine[Any, Any, None]]] = [
+                recover_pending,
+                *(s.progress.run for s in servers if s.progress),
             ]
             if status_channel is not None:
-                tasks.append(asyncio.create_task(report(status_channel)))
+                services.append(partial(report, status_channel))
             if ping is not None:
-                tasks.append(asyncio.create_task(keep_warm(ping, watcher.open_windows, journal)))
-            try:
-                await watcher.run()
-            finally:
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                services.append(partial(keep_warm, ping, watcher.open_windows, journal))
+            await _run_watcher(watcher, services)
