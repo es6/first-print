@@ -96,7 +96,7 @@ The [architecture overview](architecture.md#overview) shows how the workflows co
 | Watch supervision | `unattended`, `recorder`, `release_band`, `publication_trials` |
 | Source adapters | `sources`, `browser_sources`, `issuer_news`, `sec_results`, `quarterly_table`, `newsrooms` |
 | Transport and cleanup | `fetch`, `browser`, `_windows_desktop`, `file_downloads`, `task_lifetime` |
-| Delivery and recovery | `pipeline` (`Poster`, `Release`, `Releases`), `delivery`, `release_cards`, `edit_priority` |
+| Delivery and recovery | `pipeline` (`Release`, `Releases`), `posters` (`Poster`, Discord transport and fanout), `delivery`, `release_cards`, `release_links`, `edit_priority` |
 | Summary selection and input | `summary_request`, `summary_policy`, `driver_profile`, `driver_profiles`, `summary` |
 | Verification and display | `source_document`, `summary_verify`, `summary_binding`, `binding_text`, `summary_format`, `summary_duplicates` |
 | Estimate provenance | `consensus_prefetch` fetches before windows; `consensus` validates period, basis, currency and cutoff |
@@ -106,8 +106,10 @@ The [architecture overview](architecture.md#overview) shows how the workflows co
 `_find_date` defines evidence precedence; `_missing_date` explains an unresolved date.
 The coordinator retains the busy, deadline and stale-row checks around asynchronous work.
 
-`pipeline` keeps Discord transport implementations next to release orchestration. `Poster`
-is the interface between them; shared downloads belong to the release, not any one server.
+`posters` owns Discord transport, durable message recovery and fanout; `pipeline` owns release
+orchestration. `Poster` is their interface. Compatibility imports remain in `pipeline` for
+existing callers. `release_links` gives both sides the same SEC/PRN link identity rules.
+Shared downloads belong to the release, not any one server.
 The verifier separates candidates, source documents, binding, policy and rendering. Keep rule
 order and fail-closed evidence checks visible when changing those modules.
 

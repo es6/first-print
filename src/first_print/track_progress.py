@@ -36,7 +36,7 @@ from first_print.formatting import (
 from first_print.investigate import Report, due
 from first_print.ir_research import issuer_listing
 from first_print.known import KnownCompany, known_companies, to_target
-from first_print.pipeline import UNKNOWN_MESSAGE
+from first_print.posters import UNKNOWN_MESSAGE
 from first_print.recorder import ET, Target
 from first_print.source_audit import Speed, Timing
 from first_print.version import release_version
