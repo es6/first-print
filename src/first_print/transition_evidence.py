@@ -167,7 +167,7 @@ class TransitionEvidence:
     async def flush(self) -> None:
         for snapshot in list(self.negative.values()):
             self._enqueue(snapshot)
-        await self._queue.join()
+        # Observe writer failure before waiting on work it can no longer consume.
         if self._writer is not None:
             await self._writer
 

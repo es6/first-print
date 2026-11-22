@@ -64,6 +64,7 @@ from first_print.sources import (
     published_time,
     results_headline,
 )
+from first_print.task_lifetime import finish_owned
 from first_print.text import html_to_text, verified_report
 from first_print.transition_evidence import TransitionEvidence, public_url
 
@@ -923,8 +924,15 @@ class SharedPoll:
         finally:
             self._leave(member)
             if not self.members and self.task is not None:
-                self.task.cancel()
+                worker = self.task
                 self.task = None
+                if not worker.cancelling():
+                    worker.cancel()
+                try:
+                    await finish_owned(worker)
+                except asyncio.CancelledError:
+                    if (caller := asyncio.current_task()) is not None and caller.cancelling():
+                        raise
 
     def _every(self, sent: datetime) -> float:
         """Seconds to the next poll: as soon as any member's release times ask for one."""
