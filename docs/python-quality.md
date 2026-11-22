@@ -119,6 +119,14 @@ existing callers. `release_links` gives both sides the same SEC/PRN link identit
 Shared downloads belong to the release, not any one server.
 The verifier separates candidates, source documents, binding, policy and rendering. Keep rule
 order and fail-closed evidence checks visible when changing those modules.
+`TrackProgress._render` owns readiness and field order; `_add_watch_fields` renders route
+inventory and access evidence without changing readiness.
+
+In `summary_binding`, `_table_binding` resolves cited cells, row/column identity and their
+scope; `_paragraph_binding` resolves the number's own claim clause. Their named scope,
+position, period and basis checks share context but retain their order. Moving those loops
+into a generic rule engine would hide dependencies between checks. Compare retained binding
+outputs and known-wrong controls before changing rule order or acceptance behavior.
 
 ### Runtime owners
 
