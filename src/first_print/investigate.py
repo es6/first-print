@@ -25,7 +25,7 @@ from first_print.ir_research import issuer_links, next_page
 from first_print.issuer_news import discover_manifest, news_records, read_news
 from first_print.issuers import SEC_SUBMISSIONS, filing_form, release_time
 from first_print.known import KnownCompany, SourceCheck, known_companies, naming_offset
-from first_print.newsroom_discovery import discover_newsrooms
+from first_print.newsroom_discovery import NewsroomFinding, discover_newsrooms
 from first_print.periods import title_period
 from first_print.recorder import ET, PollError, poll
 from first_print.sec_results import SixKResults, SixKUnavailable, reported_period
@@ -759,22 +759,14 @@ def fiscal_naming(company: KnownCompany, releases: list[tuple[Sighting, str]]) -
     return company.fiscal_year_offset if learned is None else learned
 
 
-async def investigate(
+async def _results_history(
     fetcher: Fetcher,
     company: KnownCompany,
     today: date,
-    chrome: OpenChrome | None = None,
-    *,
-    sixk: SixKResults | None = None,
-    ticker: str | None = None,
-    report: Report | None = None,
-) -> KnownCompany:
-    """The company with what the bot found: its IR feed if the site has one, its press release
-    list read through Chrome, and its wire. Without `chrome`, the IR site's pages go unread.
-    `report` follows along."""
-    report = report or Report()
-    findings = Findings()
-    tried_feeds: set[str] = set()
+    report: Report,
+    sixk: SixKResults | None,
+) -> tuple[KnownCompany, list[tuple[Sighting, str]]]:
+    """Resolve the filing form and retain every recent results release used for research."""
     form = company.sec_form
     filings = None
     report.doing("Reading its SEC filings")
@@ -809,6 +801,92 @@ async def investigate(
         releases = [(result, (result.body or b"").decode()) for result in results]
     else:
         releases = await _last_releases(fetcher, company.cik)
+    return company, releases
+
+
+async def _select_sources(
+    fetcher: Fetcher,
+    company: KnownCompany,
+    findings: Findings,
+    releases: list[tuple[Sighting, str]],
+    newsrooms: list[NewsroomFinding],
+    today: date,
+    report: Report,
+) -> KnownCompany:
+    """Keep verified routes and earlier research when the new evidence supplies no replacement."""
+    found_ir = bool(findings.site or findings.feeds or findings.q4 or findings.news_api)
+    earlier = (
+        company.q4_host or company.ir_listing or company.ir_home or next(iter(company.rss), None)
+    )
+    if not found_ir and earlier:
+        # Nothing new to go on, so what earlier research verified stands
+        report.watch(
+            f"Earlier research: {urlsplit(earlier).netloc or earlier}",
+            "Kept, since its recent releases no longer name an IR site",
+        )
+    report.doing("Choosing its sources")
+    if not findings.wire:
+        with suppress(*_ERRORS):
+            findings.wire = await listed_wire(fetcher, company, releases)
+    _wire_checks(report, findings.wire)
+    found_wire = findings.wire or "unknown"
+    # GlobeNewswire's earnings feed is watched like the other two wires: when it's the wire,
+    # and when no release named one
+    globe = company.names if found_wire in ("GlobeNewswire", "unknown") else []
+    trial = company.trial.model_copy(update={"globenewswire": globe})
+    ir = {
+        "platform": "q4"
+        if findings.q4
+        else "own-site"
+        if (findings.site or findings.feeds)
+        else "unknown",
+        "q4_host": findings.site if findings.q4 else None,
+        "reachable": findings.q4 or bool(findings.feeds),
+        "rss": findings.feeds,
+        "ir_listing": findings.listing,
+        "ir_http_status": findings.ir_http_status,
+        "ir_news_api": findings.news_api,
+        "ir_home": findings.home,
+        "ir_results_api": findings.results_api,
+        "ir_results_page": findings.results_page or company.ir_results_page,
+        "ir_browser_rss": findings.browser_feed or company.ir_browser_rss,
+    }
+    if not found_ir and earlier:
+        ir = {key: getattr(company, key) for key in ir}
+    return company.model_copy(
+        update={
+            **ir,
+            "fiscal_year_offset": fiscal_naming(company, releases),
+            "ir_posted": findings.posted,
+            "ir_release": findings.release_url,
+            "wire": found_wire,
+            "trial": trial,
+            "evidence": findings.describe(today),
+            "investigated": today,
+            "investigation": INVESTIGATION,
+            "checks": report.checks,
+            "newsrooms": newsrooms,
+        }
+    )
+
+
+async def investigate(
+    fetcher: Fetcher,
+    company: KnownCompany,
+    today: date,
+    chrome: OpenChrome | None = None,
+    *,
+    sixk: SixKResults | None = None,
+    ticker: str | None = None,
+    report: Report | None = None,
+) -> KnownCompany:
+    """The company with what the bot found: its IR feed if the site has one, its press release
+    list read through Chrome, and its wire. Without `chrome`, the IR site's pages go unread.
+    `report` follows along."""
+    report = report or Report()
+    findings = Findings()
+    tried_feeds: set[str] = set()
+    company, releases = await _results_history(fetcher, company, today, report, sixk)
     texts = [copy for _, copy in releases]
     text = "\n".join(texts)
     times = company.sixk if company.sec_form == "6-K" else company.eightk
@@ -978,57 +1056,4 @@ async def investigate(
                 f"Issuer results API <{findings.results_api}>",
                 "Verified over direct HTTP. Lists each quarter's press release",
             )
-    found_ir = bool(findings.site or findings.feeds or findings.q4 or findings.news_api)
-    earlier = (
-        company.q4_host or company.ir_listing or company.ir_home or next(iter(company.rss), None)
-    )
-    if not found_ir and earlier:
-        # Nothing new to go on, so what earlier research verified stands
-        report.watch(
-            f"Earlier research: {urlsplit(earlier).netloc or earlier}",
-            "Kept, since its recent releases no longer name an IR site",
-        )
-    report.doing("Choosing its sources")
-    if not findings.wire:
-        with suppress(*_ERRORS):
-            findings.wire = await listed_wire(fetcher, company, releases)
-    _wire_checks(report, findings.wire)
-    found_wire = findings.wire or "unknown"
-    # GlobeNewswire's earnings feed is watched like the other two wires: when it's the wire,
-    # and when no release named one
-    globe = company.names if found_wire in ("GlobeNewswire", "unknown") else []
-    trial = company.trial.model_copy(update={"globenewswire": globe})
-    ir = {
-        "platform": "q4"
-        if findings.q4
-        else "own-site"
-        if (findings.site or findings.feeds)
-        else "unknown",
-        "q4_host": findings.site if findings.q4 else None,
-        "reachable": findings.q4 or bool(findings.feeds),
-        "rss": findings.feeds,
-        "ir_listing": findings.listing,
-        "ir_http_status": findings.ir_http_status,
-        "ir_news_api": findings.news_api,
-        "ir_home": findings.home,
-        "ir_results_api": findings.results_api,
-        "ir_results_page": findings.results_page or company.ir_results_page,
-        "ir_browser_rss": findings.browser_feed or company.ir_browser_rss,
-    }
-    if not found_ir and earlier:
-        ir = {key: getattr(company, key) for key in ir}
-    return company.model_copy(
-        update={
-            **ir,
-            "fiscal_year_offset": fiscal_naming(company, releases),
-            "ir_posted": findings.posted,
-            "ir_release": findings.release_url,
-            "wire": found_wire,
-            "trial": trial,
-            "evidence": findings.describe(today),
-            "investigated": today,
-            "investigation": INVESTIGATION,
-            "checks": report.checks,
-            "newsrooms": newsrooms,
-        }
-    )
+    return await _select_sources(fetcher, company, findings, releases, newsrooms, today, report)
