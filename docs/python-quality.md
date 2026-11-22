@@ -53,7 +53,8 @@ first-print/
   src/first_print/          application and its domain-specific modules
   tests/                    behavioral tests, shared fakes, fixtures and replays
   scripts/                  maintenance, evaluation and Windows operations
-  docs/                     architecture, operator guidance and dated evidence
+  docs/                     architecture and operator guidance
+  .context/                 ignored research, reviews and dated evidence
   schedules/                declarative watch and trial plans
   .github/workflows/        CI, image builds and scheduled checks
 ```
@@ -82,6 +83,48 @@ interpretation can be separated from scheduling and cache preparation without ch
 all imports at once. A `summaries/` package may eventually make that family easier to
 navigate. Keep compatibility imports where callers need them.
 Avoid a growing catch-all `utils.py` or a one-class-per-file policy.
+
+### Reading the application
+
+Start with the workflow whose behavior is changing, then follow its data and resource owners.
+The [architecture overview](architecture.md#overview) shows how the workflows connect.
+
+| Responsibility | Entry points and supporting modules |
+|---|---|
+| Startup and commands | `__main__`, `bot`, `commands`, `calendar`, `track_progress` |
+| Plans and issuer research | `date_discovery`, `investigate`, `ir_pages`, `ir_research`, `newsroom_discovery`, `known` |
+| Watch supervision | `unattended`, `recorder`, `release_band`, `publication_trials` |
+| Source adapters | `sources`, `browser_sources`, `issuer_news`, `sec_results`, `quarterly_table`, `newsrooms` |
+| Transport and cleanup | `fetch`, `browser`, `_windows_desktop`, `file_downloads`, `task_lifetime` |
+| Delivery and recovery | `pipeline` (`Poster`, `Release`, `Releases`), `delivery`, `release_cards`, `edit_priority` |
+| Summary selection and input | `summary_request`, `summary_policy`, `driver_profile`, `driver_profiles`, `summary` |
+| Verification and display | `source_document`, `summary_verify`, `summary_binding`, `binding_text`, `summary_format`, `summary_duplicates` |
+| Estimate provenance | `consensus_prefetch` fetches before windows; `consensus` validates period, basis, currency and cutoff |
+| Observations | `source_audit`, `publisher_history`, `issuer_history`, `benchmark`, `transition_evidence`, `resources` |
+
+`DateDiscovery._check` coordinates research, bounded route preparation and plan commit.
+`_find_date` defines evidence precedence; `_missing_date` explains an unresolved date.
+The coordinator retains the busy, deadline and stale-row checks around asynchronous work.
+
+`pipeline` keeps Discord transport implementations next to release orchestration. `Poster`
+is the interface between them; shared downloads belong to the release, not any one server.
+The verifier separates candidates, source documents, binding, policy and rendering. Keep rule
+order and fail-closed evidence checks visible when changing those modules.
+
+### Runtime owners
+
+| Work or resource | Owner and completion |
+|---|---|
+| Watcher and summary client | `EarningsBot` drains its watcher before Discord closes; `_watch` closes its summarizer in `finally` |
+| Window and research tasks | `DirectoryWatcher.run` cancels and gathers windows, trials and date discovery; `watch_directory` drains its auxiliary tasks |
+| Shared polling | Each `SharedPoll` member owns its deadline; the last member cancels and drains the polling worker |
+| Headline reads | `Releases` observes failures and cancels and gathers outstanding reads when the target or watcher finishes |
+| Host pacing | `Fetcher` cancels queued turns and drains dispatchers before closing the HTTP session |
+| Chrome | The fetcher holds leases for research and active reads; idle scans close only when there are no holders |
+| Downloads and release steps | `Release` retains tasks; `FileDownloads` shares successful bytes and drains workers at release completion |
+| Scorecard request | `EditPriority.card` retains the request through cancellation cleanup; release work can preempt it |
+| Response evidence | `TransitionEvidence` retains its writer; `flush` awaits it and surfaces writer failure |
+| SQLite | The enclosing watcher/store scope closes connections; transaction contexts only commit or roll back |
 
 ### Resource lifetime to verify
 

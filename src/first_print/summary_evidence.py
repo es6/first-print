@@ -1,4 +1,4 @@
-"""Unverified structured candidates for item 6; never a live-renderer input.
+"""Unverified structured candidates for source binding; never a live-renderer input.
 
 Schema and reference integrity do not prove metric, period, basis or value binding.
 The semantic verifier must establish those before these candidates can be published.

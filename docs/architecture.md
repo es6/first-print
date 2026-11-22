@@ -6,6 +6,8 @@ The dated measurements and decision log record the research that led to it. See 
 
 See [summary research](summaries.md) for the shared selection rules, model comparison and
 limits of deterministic extraction.
+The [application reading guide](python-quality.md#reading-the-application) maps these
+workflows to modules and identifies their runtime owners.
 
 ## Goal
 

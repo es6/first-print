@@ -1,4 +1,4 @@
-"""Replay saved live summaries through the item 6 verifier, offline and without model calls.
+"""Replay saved live summaries through source binding, offline and without model calls.
 
 Each fact the live checker keeps (summary_validation) is turned into the verifier's
 candidate from its own fields, and offered every paragraph and table cell of the release

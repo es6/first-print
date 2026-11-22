@@ -74,7 +74,7 @@ def main() -> None:
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--include-haiku", action="store_true")
     parser.add_argument(
-        "--references", action="store_true", help="Prepare unverified item 6 schema"
+        "--references", action="store_true", help="Prepare unverified source-reference schema"
     )
     args = parser.parse_args()
     args.out.write_text(

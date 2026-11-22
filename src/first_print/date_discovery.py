@@ -1230,74 +1230,11 @@ class DateDiscovery:
         self._phase(row.cik, "Looking for the next release date")
         now = self.now()
         unread: list[str] = []
-        saved = (
-            (row.target, row.evidence)
-            if row.target and row.evidence and row.target.window[1] > now
-            else None
-        )
-        # An issuer's word beats FMP's calendar, which beats nothing
-        if saved and saved[1] == MANUAL:
-            target, evidence = saved
-        elif result := await self._issuer_date(timed, now, unread):
-            target, evidence = result
-        elif saved and saved[1] not in (CALENDAR_DATE, CALENDAR_6K_DATE):
-            target, evidence = saved
-        elif result := await self._calendar_date(timed, now):
-            target, evidence = result
-        elif saved:
-            target, evidence = saved
-        else:
-            today = now.astimezone(ET).date()
-            # The release that came and went, whose own notice isn't one for the next
-            done = row.target if row.target and row.target.window[1] <= now else None
-            last_day = done.expected.astimezone(ET).date() if done else None
-            # A notice whose headline dates a release that has passed is an old one
-            fresh = [
-                t
-                for t in unread
-                if (
-                    not (dated := moments(t))
-                    and not (
-                        done
-                        and (named := title_period(t))
-                        and done.period == f"FY{named[0]}Q{named[1]}"
-                    )
-                )
-                or (
-                    upcoming(dated, today)
-                    and not (last_day and max(m.day for m in dated) <= last_day)
-                )
-            ]
-            if fresh:
-                seen = f" It saw the notice “{fresh[0]}” but couldn't read a date from it."
-            elif unread and not done:
-                seen = f" Its latest date notice, “{unread[0]}”, is for an earlier release."
-            else:
-                seen = ""
-            read = f" {self.ir_reads[row.cik]}" if row.cik in self.ir_reads else ""
-            if done:
-                quarter = period_label(done.period) or "Its latest"
-                speed = Speed.from_json(review)
-                confirmed = self.calendar.delivered(done.release_key) or bool(
-                    speed and speed.confident and speed.day == last_day
-                )
-                if confirmed:
-                    status = (
-                        f"{quarter} results came out {day(done.expected)}. The next release "
-                        "isn't announced yet."
-                    )
-                else:
-                    status = (
-                        f"{quarter} watch ended {day(done.expected)} without a confirmed release."
-                    )
-            else:
-                status = "No release date read yet."
-            self._phase(
-                row.cik,
-                f"{status}{read}{seen} {RECHECKING} A Manage Server "
-                "member can set one with `/track` and `when` and `period`.",
-            )
+        found = await self._find_date(timed, now, unread)
+        if found is None:
+            self._missing_date(row, now, unread, review)
             return
+        target, evidence = found
         if self._defer_if_busy(row.cik) or row not in self.calendar.entries():
             return
         if row.target and same_release(target, row.target):
@@ -1352,6 +1289,77 @@ class DateDiscovery:
             ):
                 self.status(f"📅 {describe(target, evidence)}")
         self._phase(row.cik, None)
+
+    async def _find_date(
+        self, row: Tracked, now: datetime, unread: list[str]
+    ) -> tuple[Target, str] | None:
+        """Manual dates win; issuer evidence precedes external calendar estimates."""
+        saved = (
+            (row.target, row.evidence)
+            if row.target and row.evidence and row.target.window[1] > now
+            else None
+        )
+        # An issuer's word beats FMP's calendar, which beats nothing
+        if saved and saved[1] == MANUAL:
+            return saved
+        if result := await self._issuer_date(row, now, unread):
+            return result
+        if saved and saved[1] not in (CALENDAR_DATE, CALENDAR_6K_DATE):
+            return saved
+        if result := await self._calendar_date(row, now):
+            return result
+        if saved:
+            return saved
+        return None
+
+    def _missing_date(
+        self, row: Tracked, now: datetime, unread: list[str], review: str | None
+    ) -> None:
+        today = now.astimezone(ET).date()
+        # The release that came and went, whose own notice isn't one for the next
+        done = row.target if row.target and row.target.window[1] <= now else None
+        last_day = done.expected.astimezone(ET).date() if done else None
+        # A notice whose headline dates a release that has passed is an old one
+        fresh = [
+            t
+            for t in unread
+            if (
+                not (dated := moments(t))
+                and not (
+                    done
+                    and (named := title_period(t))
+                    and done.period == f"FY{named[0]}Q{named[1]}"
+                )
+            )
+            or (upcoming(dated, today) and not (last_day and max(m.day for m in dated) <= last_day))
+        ]
+        if fresh:
+            seen = f" It saw the notice “{fresh[0]}” but couldn't read a date from it."
+        elif unread and not done:
+            seen = f" Its latest date notice, “{unread[0]}”, is for an earlier release."
+        else:
+            seen = ""
+        read = f" {self.ir_reads[row.cik]}" if row.cik in self.ir_reads else ""
+        if done:
+            quarter = period_label(done.period) or "Its latest"
+            speed = Speed.from_json(review)
+            confirmed = self.calendar.delivered(done.release_key) or bool(
+                speed and speed.confident and speed.day == last_day
+            )
+            if confirmed:
+                status = (
+                    f"{quarter} results came out {day(done.expected)}. The next release "
+                    "isn't announced yet."
+                )
+            else:
+                status = f"{quarter} watch ended {day(done.expected)} without a confirmed release."
+        else:
+            status = "No release date read yet."
+        self._phase(
+            row.cik,
+            f"{status}{read}{seen} {RECHECKING} A Manage Server "
+            "member can set one with `/track` and `when` and `period`.",
+        )
 
     async def _issuer_routes(self, row: Tracked, target: Target, evidence: str) -> Target:
         existing_ir = target.ir
