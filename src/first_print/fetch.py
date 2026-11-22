@@ -241,9 +241,16 @@ class Fetcher:
         try:
             await self.close_browser()
         finally:
+            dispatchers = []
             for queue in self._queues.values():
                 if queue.dispatcher is not None:
                     queue.dispatcher.cancel()
+                    dispatchers.append(queue.dispatcher)
+                # Closing the dispatcher alone leaves callers awaiting turns it can no
+                # longer grant. Wake those callers before releasing the HTTP transport.
+                for _, _, turn in queue.waiting:
+                    turn.cancel()
+            await asyncio.gather(*dispatchers, return_exceptions=True)
             if self._session is not None:
                 await self._session.close()
 

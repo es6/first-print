@@ -1304,7 +1304,15 @@ class Releases:
         task = asyncio.create_task(self._read_headline(target, source, sighting, measure))
         tasks = self.checks.setdefault(key, set())
         tasks.add(task)
-        task.add_done_callback(tasks.discard)
+
+        def finished(task: asyncio.Task[None]) -> None:
+            tasks.discard(task)
+            if not task.cancelled() and (error := task.exception()) is not None:
+                self.journal.write(
+                    "headline_check", ticker=target.ticker, source=source.name, error=repr(error)
+                )
+
+        task.add_done_callback(finished)
 
     async def _read_headline(
         self, target: Target, source: Source, sighting: Sighting, measure: bool
@@ -1333,13 +1341,24 @@ class Releases:
             self.on_new(target, source, replace(sighting, earnings=True), measure=measure)
 
     async def finish_target(self, target: Target) -> None:
-        for task in self.checks.pop(target.release_key, set()):
-            task.cancel()
+        await self._finish_checks(self.checks.pop(target.release_key, set()))
         self.checked.pop(target.release_key, None)
         if release := self.active.get(target.release_key):
             await release.finish()
             del self.active[target.release_key]
 
     async def finish(self) -> None:
+        checks = [task for tasks in self.checks.values() for task in tasks]
+        await self._finish_checks(checks)
+        self.checks.clear()
+        self.checked.clear()
         for release in self.active.values():
             await release.finish()
+
+    @staticmethod
+    async def _finish_checks(tasks: Iterable[asyncio.Task[None]]) -> None:
+        tasks = tuple(tasks)
+        for task in tasks:
+            if not task.cancelling():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)

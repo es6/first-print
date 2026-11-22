@@ -32,11 +32,25 @@ def calendar_rows(raw: str) -> list[dict[str, str]]:
     required = {"symbol", "reportDate", "fiscalDateEnding", "currency"}
     if not required <= set(rows.fieldnames or ()):
         raise ValueError("Alpha Vantage calendar fields are missing")
-    return list(rows)
+    result = []
+    for row in rows:
+        if not all(isinstance(row.get(field), str) for field in required):
+            continue
+        try:
+            date.fromisoformat(row["reportDate"])
+            date.fromisoformat(row["fiscalDateEnding"])
+        except ValueError:
+            continue
+        result.append({k: v for k, v in row.items() if isinstance(k, str) and isinstance(v, str)})
+    return result
 
 
-def estimate_rows(data: dict[str, Any], symbol: str, currency: str) -> list[dict[str, str]]:
-    if data.get("symbol") != symbol or not isinstance(data.get("estimates"), list):
+def estimate_rows(data: object, symbol: str, currency: str) -> list[dict[str, str]]:
+    if (
+        not isinstance(data, dict)
+        or data.get("symbol") != symbol
+        or not isinstance(data.get("estimates"), list)
+    ):
         raise ValueError("Alpha Vantage estimate identity/data unavailable")
     if not re.fullmatch(r"[A-Z]{3}", currency):
         raise ValueError("Estimate currency is not verified")
