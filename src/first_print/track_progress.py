@@ -562,6 +562,44 @@ class TrackProgress:
             embed.add_field(name=name, value=value, inline=False)
 
         checks = report.checks if report is not None else row.company.checks
+        self._add_watch_fields(embed, row, target, watched_rooms, cache)
+
+        rejected = [
+            f"**{check.source}**: {check.why}"
+            for check in checks
+            if not check.watch
+            # Verified for this release since, so it's watched after all
+            and not (
+                target
+                and target.ir
+                and target.ir.listing
+                and "press release page" in check.source
+                and (
+                    target.ir.listing in check.source
+                    or (urlsplit(target.ir.listing).hostname or "__none__") in check.source
+                )
+            )
+        ]
+        if target and target.ir is None and note and issuer_listing(row.ticker, row.company):
+            rejected.append(f"**{source_label('browser-ir')}**: {note}")
+        if rejected:
+            embed.add_field(name="🚫 Checked and rejected", value=bullets(rejected), inline=False)
+        elif catalog:
+            embed.add_field(
+                name="📝 Research", value=truncate(row.company.evidence, 1024), inline=False
+            )
+        embed.set_footer(text=f"First Print {release_version()} · Updated")
+        return embed, bool(target and complete and caveats)
+
+    def _add_watch_fields(
+        self,
+        embed: discord.Embed,
+        row: Tracked,
+        target: Target | None,
+        watched_rooms: set[str],
+        cache: list[str] | None,
+    ) -> None:
+        """Render source/access evidence without deciding the scorecard's readiness."""
         if target:
             sources = target.sources()
             watching = watch_list(sources)
@@ -610,33 +648,6 @@ class TrackProgress:
                 value=f"[Press release listing](<{listing}>) · {access}",
                 inline=False,
             )
-
-        rejected = [
-            f"**{check.source}**: {check.why}"
-            for check in checks
-            if not check.watch
-            # Verified for this release since, so it's watched after all
-            and not (
-                target
-                and target.ir
-                and target.ir.listing
-                and "press release page" in check.source
-                and (
-                    target.ir.listing in check.source
-                    or (urlsplit(target.ir.listing).hostname or "__none__") in check.source
-                )
-            )
-        ]
-        if target and target.ir is None and note and issuer_listing(row.ticker, row.company):
-            rejected.append(f"**{source_label('browser-ir')}**: {note}")
-        if rejected:
-            embed.add_field(name="🚫 Checked and rejected", value=bullets(rejected), inline=False)
-        elif catalog:
-            embed.add_field(
-                name="📝 Research", value=truncate(row.company.evidence, 1024), inline=False
-            )
-        embed.set_footer(text=f"First Print {release_version()} · Updated")
-        return embed, bool(target and complete and caveats)
 
     async def _check(self, row: Tracked) -> None:
         try:
